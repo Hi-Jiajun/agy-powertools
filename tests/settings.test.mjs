@@ -63,13 +63,53 @@ test('settings persist, merge safely, and reject unknown options without changin
     assert.equal(store.get().accountViewMode, 'list');
     assert.equal(store.get().accountQuotaWindow, '5h');
     assert.equal(store.get().autoSwitchAccount, false);
-    store.set({ multiAccount: true, accountSwitcher: false, accountViewMode: 'card', accountQuotaWindow: 'weekly', autoSwitchAccount: true });
+    assert.equal(store.get().autoSwitchStrategy, 'smart');
+    assert.equal(store.get().autoSwitchThreshold, 0);
+    assert.equal(store.get().autoSwitchInclude3p, false);
+    assert.equal(store.get().autoSwitchRunningPolicy, 'wait');
+    store.set({
+      multiAccount: true,
+      accountSwitcher: false,
+      accountViewMode: 'card',
+      accountQuotaWindow: 'weekly',
+      autoSwitchAccount: true,
+      autoSwitchStrategy: 'cost-low',
+      autoSwitchThreshold: 10,
+      autoSwitchInclude3p: true,
+      autoSwitchRunningPolicy: 'pause'
+    });
     assert.equal(store.get().multiAccount, true);
     assert.equal(store.get().accountSwitcher, false);
     assert.equal(store.get().accountViewMode, 'card');
     assert.equal(store.get().accountQuotaWindow, 'weekly');
     assert.equal(store.get().autoSwitchAccount, true);
-    store.set({ multiAccount: false, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false });
+    assert.equal(store.get().autoSwitchStrategy, 'cost-low');
+    assert.equal(store.get().autoSwitchThreshold, 10);
+    assert.equal(store.get().autoSwitchInclude3p, true);
+    assert.equal(store.get().autoSwitchRunningPolicy, 'pause');
+    for (const strategy of ['smart', 'priority', 'tier-first', 'weighted-quota', 'earliest-reset', 'cost-low', 'cost-high']) {
+      store.set({ autoSwitchStrategy: strategy });
+      assert.equal(store.get().autoSwitchStrategy, strategy);
+    }
+    for (const threshold of [0, 5, 10]) {
+      store.set({ autoSwitchThreshold: threshold });
+      assert.equal(store.get().autoSwitchThreshold, threshold);
+    }
+    for (const policy of ['wait', 'pause', 'force']) {
+      store.set({ autoSwitchRunningPolicy: policy });
+      assert.equal(store.get().autoSwitchRunningPolicy, policy);
+    }
+    store.set({
+      multiAccount: false,
+      accountSwitcher: true,
+      accountViewMode: 'list',
+      accountQuotaWindow: '5h',
+      autoSwitchAccount: false,
+      autoSwitchStrategy: 'smart',
+      autoSwitchThreshold: 0,
+      autoSwitchInclude3p: false,
+      autoSwitchRunningPolicy: 'wait'
+    });
     assert.equal(store.get().proxyEnabled, false);
     assert.equal(store.get().proxyUrl, '');
     assert.equal(store.get().proxyBypass, 'localhost,127.0.0.1,::1');
@@ -99,7 +139,7 @@ test('settings persist, merge safely, and reject unknown options without changin
     store.set({contextLimit:256000});assert.equal(store.get().contextLimit,256000);
     store.set({contextLimit:0});assert.equal(store.get().contextLimit,0);
     const before = readFileSync(join(directory, 'settings.json'), 'utf8');
-    for (const value of [{ compact: 'false' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { composerQuotaHaloWindow: '1d' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
+    for (const value of [{ compact: 'false' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { composerQuotaHaloWindow: '1d' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {autoSwitchStrategy:'round-robin'}, {autoSwitchThreshold:20}, {autoSwitchInclude3p:'yes'}, {autoSwitchRunningPolicy:'kill'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
     assert.equal(readFileSync(join(directory, 'settings.json'), 'utf8'), before);
     store.set(DEFAULT_SETTINGS); assert.deepEqual(store.get(), DEFAULT_SETTINGS);
   } finally { rmSync(directory, { recursive: true, force: true }); }

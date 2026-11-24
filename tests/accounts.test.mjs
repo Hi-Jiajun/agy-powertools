@@ -12,6 +12,12 @@ import {
   formatResetCountdown,
   formatCompactCountdown,
   accountInitials,
+  officialTierCatalog,
+  normalizeModelCapability,
+  accountTierProfile,
+  accountSupportsModel,
+  evaluateAutoSwitchTrigger,
+  rankAutoSwitchCandidates,
   selectAutoSwitchCandidate
 } from '../lib/account-helpers.mjs';
 import { createAccountsStore } from '../lib/accounts.mjs';
@@ -292,9 +298,9 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     mT: 'select-menu',
     nT: 'select-item'
   });
-  vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, selectAutoSwitchCandidate }; })();`, context);
+  vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, officialTierCatalog, normalizeModelCapability, accountTierProfile, accountSupportsModel, evaluateAutoSwitchTrigger, rankAutoSwitchCandidates, selectAutoSwitchCandidate }; })();`, context);
   vm.runInContext(panelsCode, context);
-  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', titlebarQuickPanel: true, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, proxyEnabled: false, ...opts };
+  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', titlebarQuickPanel: true, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, autoSwitchStrategy: 'smart', autoSwitchThreshold: 0, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'wait', proxyEnabled: false, ...opts };
   const panels = context.__agyPanels({
     version: '2.15.0',
     t: v => v,
@@ -320,6 +326,10 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     setBeamPreview: v => hooks.onSetBeamPreview?.(v),
     openManagementTab: tab => hooks.onOpenManagementTab?.(tab),
     openNativeSettings: () => hooks.onOpenSettings?.(),
+    updateAccountProfile: (id, patch) => {
+      hooks.onUpdateProfile?.(id, patch);
+      return Promise.resolve({ ok: true });
+    },
     refreshAccountQuotas: id => {
       hooks.onRefreshQuotas?.(id);
       return hooks.refreshAccountQuotasImpl ? hooks.refreshAccountQuotasImpl(id) : Promise.resolve({ ok: true });
@@ -1601,4 +1611,352 @@ test('Pricing provides standard vs API promo basis switch, clean single-row rate
   for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) {
     assert.equal(enText.includes(forbidden), false);
   }
+});
+
+test('accountTierProfile detects Ultra 5x/20x, Pro Trial, family shared weighting, treatAsFree, and custom expiry dates', () => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  const catalog = officialTierCatalog();
+  assert.equal(catalog.ultra20.officialMonthlyUsd, 199.99);
+  assert.equal(catalog.ultra5.officialMonthlyUsd, 99.99);
+  assert.equal(catalog.pro.officialMonthlyUsd, 19.99);
+  assert.equal(catalog.plus.officialMonthlyUsd, 4.99);
+  assert.equal(catalog.free.officialMonthlyUsd, 0);
+
+  // Ultra 5x (g1-ultra-lite-tier) vs Ultra 20x (g1-ultra-tier)
+  const u5 = accountTierProfile({ tier: { id: 'g1-ultra-lite-tier', name: 'Google AI Ultra' } }, now);
+  assert.equal(u5.tierKey, 'ultra5');
+  assert.equal(u5.effectiveWeight, 5);
+  assert.equal(u5.effectiveMonthlyUsd, 99.99);
+
+  const u20 = accountTierProfile({ tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' } }, now);
+  assert.equal(u20.tierKey, 'ultra20');
+  assert.equal(u20.effectiveWeight, 20);
+  assert.equal(u20.effectiveMonthlyUsd, 199.99);
+
+  // Auto-inferred Pro Trial when Pro tier lacks frontier models or 5h bucket
+  const trialByModels = accountTierProfile({
+    tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+    availableModels: ['Gemini 3.8 Flash']
+  }, now);
+  assert.equal(trialByModels.tierKey, 'pro-trial');
+  assert.equal(trialByModels.inferredTrial, true);
+  assert.equal(trialByModels.tierMeta.restricted, true);
+
+  const trialByBuckets = accountTierProfile({
+    tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+    groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.8 }] }]
+  }, now);
+  assert.equal(trialByBuckets.tierKey, 'pro-trial');
+  assert.equal(trialByBuckets.inferredTrial, true);
+
+  // Manual tierOverride takes precedence
+  const overridden = accountTierProfile({
+    tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+    tierOverride: 'ultra5'
+  }, now);
+  assert.equal(overridden.tierKey, 'ultra5');
+  assert.equal(overridden.effectiveWeight, 5);
+
+  // Family group modes: exclusive keeps 100%, shared scales by members / observedQuotaUsd / customWeight
+  const famExcl = accountTierProfile({ tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' }, familyMode: 'family-exclusive' }, now);
+  assert.equal(famExcl.effectiveWeight, 20);
+  const famSharedByMembers = accountTierProfile({ tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' }, familyMode: 'family-shared', familyMembers: 4 }, now);
+  assert.equal(famSharedByMembers.effectiveWeight, 5);
+  assert.equal(famSharedByMembers.weightSource, 'shared');
+  const famSharedByObs = accountTierProfile({ tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' }, familyMode: 'family-shared', familyMembers: 4, observedQuotaUsd: 60 }, now, { baselineProUsd: 10 });
+  assert.equal(famSharedByObs.effectiveWeight, 6);
+  assert.equal(famSharedByObs.weightSource, 'observed');
+  const famSharedCustom = accountTierProfile({ tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' }, familyMode: 'family-shared', customWeight: 8.5 }, now, { baselineProUsd: 10 });
+  assert.equal(famSharedCustom.effectiveWeight, 8.5);
+  assert.equal(famSharedCustom.weightSource, 'custom');
+
+  // treatAsFree preserves real Pro tier & weight while setting scheduling cost to $0 (distinct from Free tier)
+  const freeTreatedPro = accountTierProfile({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, monthlyPriceUsd: 19.99, treatAsFree: true }, now);
+  assert.equal(freeTreatedPro.tierKey, 'pro');
+  assert.equal(freeTreatedPro.effectiveWeight, 1);
+  assert.equal(freeTreatedPro.effectiveMonthlyUsd, 0);
+  assert.equal(freeTreatedPro.treatAsFree, true);
+
+  // Expiry dates: expired, expiringSoon (<=7d), and future (>7d)
+  const expired = accountTierProfile({ expiresAt: '2026-11-24' }, now);
+  assert.equal(expired.isExpired, true);
+  assert.equal(expired.expiringSoon, false);
+  const soon = accountTierProfile({ expiresAt: '2026-11-28' }, now);
+  assert.equal(soon.isExpired, false);
+  assert.equal(soon.expiringSoon, true);
+  assert.ok(soon.daysUntilExpiry >= 3 && soon.daysUntilExpiry <= 4);
+  const far = accountTierProfile({ expiresAt: '2026-12-25' }, now);
+  assert.equal(far.isExpired, false);
+  assert.equal(far.expiringSoon, false);
+});
+
+test('evaluateAutoSwitchTrigger and rankAutoSwitchCandidates enforce model compatibility, expiry, shared family pool, and all 7 strategies', () => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  assert.equal(normalizeModelCapability('Claude Sonnet 5.5 (High)'), 'claude-sonnet-5-5');
+
+  // Trigger evaluation: default Gemini-only ignores Claude 0%, include3p triggers on Claude, threshold 5% triggers early
+  const groupsMixed = [
+    { displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.04, resetTimeMs: now + 3600_000 }] },
+    { displayName: 'Claude and GPT models', buckets: [{ bucketId: 'c-5h', window: '5h', remainingFraction: 0, resetTimeMs: now + 3600_000 }] }
+  ];
+  assert.equal(evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Gemini 4 Carbon', thresholdPct: 0, include3p: false }), null);
+  assert.equal(evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Claude Sonnet 5.5', thresholdPct: 0, include3p: false }), null);
+  const claudeHit = evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Claude Sonnet 5.5', thresholdPct: 0, include3p: true });
+  assert.equal(claudeHit?.groupKey, 'claude');
+  const earlyGeminiHit = evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Gemini 4 Carbon', thresholdPct: 5, include3p: false });
+  assert.equal(earlyGeminiHit?.groupKey, 'gemini');
+  assert.equal(earlyGeminiHit?.fraction, 0.04);
+
+  // Model compatibility: Free/Trial blocked for Claude/Carbon, no blind groups[0] fallback for Claude
+  const geminiOnlyPro = {
+    id: 'gem-only',
+    tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+    groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
+  };
+  assert.equal(accountSupportsModel(geminiOnlyPro, 'Claude Sonnet 5.5', 'claude', now).supported, false);
+  const trialAcct = {
+    id: 'trial',
+    tier: { id: 'g1-pro-trial', name: 'Pro Trial' },
+    groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
+  };
+  assert.equal(accountSupportsModel(trialAcct, 'Gemini 4 Carbon', 'gemini', now).supported, false);
+
+  // Full candidate pool across all 7 strategies + shared family & expiry skipping
+  const pool = [
+    {
+      id: 'active',
+      hasCredential: true,
+      tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      familyMode: 'family-shared',
+      familyGroupId: 'fam-A',
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0, resetTimeMs: now + 3600_000 }] }]
+    },
+    {
+      id: 'same-family',
+      hasCredential: true,
+      tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      familyMode: 'family-shared',
+      familyGroupId: 'fam-A',
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
+    },
+    {
+      id: 'expired-ultra',
+      hasCredential: true,
+      tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      expiresAt: '2026-11-20',
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
+    },
+    {
+      id: 'pro-free-untouched',
+      hasCredential: true,
+      tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+      treatAsFree: true,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1, resetTimeMs: null }] }]
+    },
+    {
+      id: 'ultra5-ticking',
+      hasCredential: true,
+      tier: { id: 'g1-ultra-lite-tier', name: 'Google AI Ultra' },
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.6, resetTimeMs: now + 2 * 3600_000 }] }]
+    },
+    {
+      id: 'ultra20-untouched',
+      hasCredential: true,
+      tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1, resetTimeMs: null }] }]
+    },
+    {
+      id: 'pro-expiring-soon',
+      hasCredential: true,
+      tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+      expiresAt: '2026-11-27',
+      monthlyPriceUsd: 10,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.9, resetTimeMs: now + 4 * 3600_000 }] }]
+    }
+  ];
+
+  // 1. smart: skips same-family & expired; prioritizes expiring-soon first, then ticking window before untouched 100%
+  const smartRes = rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', activeModel: 'Gemini 4 Carbon', strategy: 'smart', now });
+  assert.equal(smartRes.skipped.some(s => s.id === 'same-family' && s.reason === 'same-shared-family'), true);
+  assert.equal(smartRes.skipped.some(s => s.id === 'expired-ultra' && s.reason === 'expired'), true);
+  assert.equal(smartRes.candidate.id, 'pro-expiring-soon');
+  assert.equal(smartRes.candidates[1].account.id, 'ultra5-ticking');
+  assert.equal(smartRes.candidates[2].account.id, 'ultra20-untouched');
+
+  // 2. priority: respects drag list order among eligible
+  assert.equal(rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'priority', now }).candidate.id, 'pro-free-untouched');
+
+  // 3. tier-first: Ultra 20x > Ultra 5x > Pro
+  assert.equal(rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'tier-first', now }).candidate.id, 'ultra20-untouched');
+
+  // 4. weighted-quota: Ultra 20x (20.0) > Ultra 5x (3.0) > Pro (1.0)
+  assert.equal(rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'weighted-quota', now }).candidate.id, 'ultra20-untouched');
+
+  // 5. earliest-reset: expiring-soon first, then ticking soonest (ultra5-ticking in 2h)
+  const earliestRes = rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'earliest-reset', now });
+  assert.equal(earliestRes.candidate.id, 'pro-expiring-soon');
+  assert.equal(earliestRes.candidates[1].account.id, 'ultra5-ticking');
+
+  // 6. cost-low: treatAsFree ($0) first, then lowest $/weight (ultra20 $10/w < pro-expiring $10/w tie -> weighted remaining)
+  const lowRes = rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'cost-low', now });
+  assert.equal(lowRes.candidate.id, 'pro-free-untouched');
+
+  // 7. cost-high: highest monthly spend first (ultra20 $199.99 > ultra5 $99.99 > pro $10 > treatAsFree $0)
+  const highRes = rankAutoSwitchCandidates(pool, 'active', { depletedGroupKey: 'gemini', strategy: 'cost-high', now });
+  assert.equal(highRes.candidate.id, 'ultra20-untouched');
+  assert.equal(highRes.candidates[1].account.id, 'ultra5-ticking');
+});
+
+test('createAccountsStore updateProfile validates & persists extended metadata and syncActive records models/observedQuotaUsd', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-profile-store-'));
+  const vault = createFakeVault({ 'gemini:antigravity': 'tok-1' });
+  try {
+    const store = createAccountsStore(dir, { vault });
+    const synced = store.syncActive({
+      email: 'alice@example.com',
+      name: 'Alice',
+      tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+      models: ['Gemini 4 Carbon (High)', 'Gemini 4 Neon'],
+      observedQuotaUsd: 18.5,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.7 }] }]
+    });
+    const id = synced.activeId;
+    assert.deepEqual(synced.accounts[0].availableModels, ['gemini-4-carbon', 'gemini-4-neon']);
+    assert.equal(synced.accounts[0].observedQuotaUsd, 18.5);
+
+    const updated = store.updateProfile(id, {
+      alias: '家庭拼车',
+      tierOverride: 'ultra5',
+      familyMode: 'family-shared',
+      familyRole: 'member',
+      familyGroupId: 'group-alpha',
+      familyMembers: 3,
+      customWeight: 2.5,
+      monthlyPriceUsd: 33.5,
+      treatAsFree: true,
+      expiresAt: '2026-12-31'
+    });
+    assert.equal(updated.ok, true);
+    assert.equal(updated.account.alias, '家庭拼车');
+    assert.equal(updated.account.tierOverride, 'ultra5');
+    assert.equal(updated.account.familyMode, 'family-shared');
+    assert.equal(updated.account.familyRole, 'member');
+    assert.equal(updated.account.familyGroupId, 'group-alpha');
+    assert.equal(updated.account.familyMembers, 3);
+    assert.equal(updated.account.customWeight, 2.5);
+    assert.equal(updated.account.monthlyPriceUsd, 33.5);
+    assert.equal(updated.account.treatAsFree, true);
+    assert.equal(updated.account.expiresAt, '2026-12-31');
+
+    // Reload from disk confirms persistence
+    const reloaded = createAccountsStore(dir, { vault }).list().accounts[0];
+    assert.equal(reloaded.expiresAt, '2026-12-31');
+    assert.equal(reloaded.familyGroupId, 'group-alpha');
+    assert.equal(reloaded.treatAsFree, true);
+
+    // Reject invalid profile fields cleanly
+    assert.throws(() => store.updateProfile(id, { expiresAt: '2026/12/31' }), /到期日期/);
+    assert.throws(() => store.updateProfile(id, { familyMembers: 1 }), /家庭共享人数/);
+    assert.throws(() => store.updateProfile(id, { monthlyPriceUsd: -5 }), /价格/);
+    assert.throws(() => store.updateProfile(id, { customWeight: 0 }), /权重/);
+    assert.throws(() => store.updateProfile(id, { tierOverride: 'bogus' }), /档位/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Quotas and Settings render smart scheduler controls, next-target badge, account profile modal, and zero middle dots', async () => {
+  const now = Date.now();
+  const futureDays = days => new Date(now + days * 86400_000).toISOString().slice(0, 10);
+  const accounts = [
+    {
+      id: 'acct-active',
+      email: 'main@example.com',
+      name: 'Main User',
+      tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      hasCredential: true,
+      disabled: false,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.2, resetTimeMs: now + 3600_000 }] }]
+    },
+    {
+      id: 'acct-soon',
+      email: 'carpool@example.com',
+      name: 'Carpool User',
+      tier: { id: 'g1-ultra-lite-tier', name: 'Google AI Ultra' },
+      familyMode: 'family-shared',
+      familyRole: 'member',
+      familyGroupId: 'team-1',
+      familyMembers: 3,
+      treatAsFree: true,
+      expiresAt: futureDays(3),
+      hasCredential: true,
+      disabled: false,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.85, resetTimeMs: now + 2 * 3600_000 }] }]
+    },
+    {
+      id: 'acct-expired',
+      email: 'old@example.com',
+      name: 'Expired User',
+      tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+      expiresAt: '2020-01-01',
+      hasCredential: true,
+      disabled: false,
+      groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
+    }
+  ];
+
+  const savedProfiles = [];
+  const ui = createPanelHarness(
+    { activeId: 'acct-active', accounts },
+    { multiAccount: true, autoSwitchAccount: true, autoSwitchStrategy: 'smart', autoSwitchThreshold: 5, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'pause' },
+    { onUpdateProfile: (id, patch) => savedProfiles.push({ id, patch }) }
+  );
+
+  // Settings displays all 4 new auto-switch rows when multiAccount && autoSwitchAccount are ON
+  const settingsTree = ui.renderSettings();
+  assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchStrategy'));
+  assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchThreshold'));
+  assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchInclude3p'));
+  assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchRunningPolicy'));
+  const settingsText = ui.collectText(settingsTree);
+  for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) assert.equal(settingsText.includes(forbidden), false);
+
+  // Settings hides scheduling sub-rows when autoSwitchAccount is OFF
+  const offAutoUi = createPanelHarness({ activeId: 'acct-active', accounts }, { multiAccount: true, autoSwitchAccount: false });
+  assert.equal(offAutoUi.find(offAutoUi.renderSettings(), 'agy-setting-row-autoSwitchStrategy'), null);
+
+  // Quotas displays strategy selector, next-target badge on acct-soon, family/free/expiring/expired badges
+  let quotasTree = ui.renderQuotas();
+  assert.ok(ui.find(quotasTree, 'agy-quotas-strategy-select'));
+  const soonRow = ui.find(quotasTree, 'agy-account-row-acct-soon');
+  assert.ok(ui.find(soonRow, 'agy-account-next-badge'));
+  assert.ok(ui.find(soonRow, 'agy-account-family-badge'));
+  assert.ok(ui.find(soonRow, 'agy-account-free-badge'));
+  assert.ok(ui.find(soonRow, 'agy-account-expiring-badge'));
+  const expiredRow = ui.find(quotasTree, 'agy-account-row-acct-expired');
+  assert.ok(ui.find(expiredRow, 'agy-account-expired-badge'));
+  assert.equal(ui.find(expiredRow, 'agy-account-next-badge'), null);
+  const quotasText = ui.collectText(quotasTree);
+  assert.ok(quotasText.includes('Ultra 5x'));
+  for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) assert.equal(quotasText.includes(forbidden), false);
+
+  // Open AccountProfileModal via profile button and submit updated profile
+  const profileBtn = ui.find(quotasTree, 'agy-profile-account-acct-soon');
+  assert.ok(profileBtn);
+  profileBtn.props.onClick();
+  quotasTree = ui.renderQuotas();
+  const dialog = ui.find(quotasTree, 'agy-account-profile-dialog');
+  assert.ok(dialog);
+  assert.ok(ui.find(dialog, 'agy-profile-preview'));
+  ui.find(dialog, 'agy-profile-alias').props.onChange({ target: { value: '拼车主力' } });
+  ui.find(dialog, 'agy-profile-expires').props.onChange({ target: { value: '2026-12-20' } });
+  quotasTree = ui.renderQuotas();
+  const form = ui.findAll(ui.find(quotasTree, 'agy-account-profile-dialog'), n => n.type === 'form')[0];
+  await form.props.onSubmit({ preventDefault() {} });
+  assert.equal(savedProfiles.length, 1);
+  assert.equal(savedProfiles[0].id, 'acct-soon');
+  assert.equal(savedProfiles[0].patch.alias, '拼车主力');
+  assert.equal(savedProfiles[0].patch.expiresAt, '2026-12-20');
+  assert.equal(savedProfiles[0].patch.familyMode, 'family-shared');
+  assert.equal(savedProfiles[0].patch.treatAsFree, true);
 });
