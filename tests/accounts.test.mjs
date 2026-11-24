@@ -1677,22 +1677,40 @@ test('accountTierProfile detects Ultra 5x/20x, Pro Trial, family shared weightin
   assert.equal(freeTreatedPro.effectiveMonthlyUsd, 0);
   assert.equal(freeTreatedPro.treatAsFree, true);
 
-  // Expiry dates: expired, expiringSoon (<=7d), and future (>7d)
-  const expired = accountTierProfile({ expiresAt: '2026-11-24' }, now);
+  // Expiry dates: expired, today (0d), tomorrow (1d), soon (<=7d), future (>7d), and invalid calendar date ignored
+  const localNow = new Date(2026, 10, 25, 12, 0, 0, 0).getTime();
+  const expired = accountTierProfile({ expiresAt: '2026-11-24' }, localNow);
   assert.equal(expired.isExpired, true);
   assert.equal(expired.expiringSoon, false);
-  const soon = accountTierProfile({ expiresAt: '2026-11-28' }, now);
+  const todayExp = accountTierProfile({ expiresAt: '2026-11-25' }, localNow);
+  assert.equal(todayExp.isExpired, false);
+  assert.equal(todayExp.expiringSoon, true);
+  assert.equal(todayExp.daysUntilExpiry, 0);
+  const tomorrowExp = accountTierProfile({ expiresAt: '2026-11-26' }, localNow);
+  assert.equal(tomorrowExp.isExpired, false);
+  assert.equal(tomorrowExp.expiringSoon, true);
+  assert.equal(tomorrowExp.daysUntilExpiry, 1);
+  const soon = accountTierProfile({ expiresAt: '2026-11-28' }, localNow);
   assert.equal(soon.isExpired, false);
   assert.equal(soon.expiringSoon, true);
-  assert.ok(soon.daysUntilExpiry >= 3 && soon.daysUntilExpiry <= 4);
-  const far = accountTierProfile({ expiresAt: '2026-12-25' }, now);
+  assert.equal(soon.daysUntilExpiry, 3);
+  const far = accountTierProfile({ expiresAt: '2026-12-25' }, localNow);
   assert.equal(far.isExpired, false);
   assert.equal(far.expiringSoon, false);
+  const bogusDate = accountTierProfile({ expiresAt: '2026-02-31' }, localNow);
+  assert.equal(bogusDate.expiresAt, '');
+  assert.equal(bogusDate.isExpired, false);
+  // Prototype keys cannot hijack tierOverride
+  const protoOverride = accountTierProfile({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, tierOverride: 'toString' }, localNow);
+  assert.equal(protoOverride.tierKey, 'pro');
 });
 
 test('evaluateAutoSwitchTrigger and rankAutoSwitchCandidates enforce model compatibility, expiry, shared family pool, and all 7 strategies', () => {
-  const now = Date.parse('2026-11-25T12:00:00Z');
+  const now = new Date(2026, 10, 25, 12, 0, 0, 0).getTime();
   assert.equal(normalizeModelCapability('Claude Sonnet 5.5 (High)'), 'claude-sonnet-5-5');
+  assert.equal(normalizeModelCapability('Gemini 4 Neon Extra High'), 'gemini-4-neon');
+  assert.equal(normalizeModelCapability('Orchestrator (Claude Opus 5.5)'), 'orchestrator-claude-opus-5-5');
+  assert.equal(normalizeModelCapability('Orchestrator (Argon)'), 'orchestrator-argon');
 
   // Trigger evaluation: default Gemini-only ignores Claude 0%, include3p triggers on Claude, threshold 5% triggers early
   const groupsMixed = [
@@ -1703,17 +1721,22 @@ test('evaluateAutoSwitchTrigger and rankAutoSwitchCandidates enforce model compa
   assert.equal(evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Claude Sonnet 5.5', thresholdPct: 0, include3p: false }), null);
   const claudeHit = evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Claude Sonnet 5.5', thresholdPct: 0, include3p: true });
   assert.equal(claudeHit?.groupKey, 'claude');
+  const orchClaudeHit = evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Orchestrator (Claude Opus 5.5)', thresholdPct: 0, include3p: true });
+  assert.equal(orchClaudeHit?.groupKey, 'claude');
   const earlyGeminiHit = evaluateAutoSwitchTrigger(groupsMixed, { activeModel: 'Gemini 4 Carbon', thresholdPct: 5, include3p: false });
   assert.equal(earlyGeminiHit?.groupKey, 'gemini');
   assert.equal(earlyGeminiHit?.fraction, 0.04);
 
-  // Model compatibility: Free/Trial blocked for Claude/Carbon, no blind groups[0] fallback for Claude
+  // Model compatibility: Free/Trial blocked for Claude/Carbon, no blind groups[0] fallback for Claude, Argon requires Argon support
   const geminiOnlyPro = {
     id: 'gem-only',
     tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+    availableModels: ['Gemini 4 Carbon'],
     groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 1 }] }]
   };
   assert.equal(accountSupportsModel(geminiOnlyPro, 'Claude Sonnet 5.5', 'claude', now).supported, false);
+  assert.equal(accountSupportsModel(geminiOnlyPro, 'Orchestrator (Claude Opus 5.5)', 'claude', now).supported, false);
+  assert.equal(accountSupportsModel(geminiOnlyPro, 'Orchestrator (Argon)', 'argon', now).supported, false);
   const trialAcct = {
     id: 'trial',
     tier: { id: 'g1-pro-trial', name: 'Pro Trial' },
@@ -1854,11 +1877,17 @@ test('createAccountsStore updateProfile validates & persists extended metadata a
     assert.equal(reloaded.familyGroupId, 'group-alpha');
     assert.equal(reloaded.treatAsFree, true);
 
-    // Reject invalid profile fields cleanly
+    // Reject invalid profile fields cleanly (including bogus calendar dates, booleans, and tiny weights that round to 0)
     assert.throws(() => store.updateProfile(id, { expiresAt: '2026/12/31' }), /到期日期/);
+    assert.throws(() => store.updateProfile(id, { expiresAt: '2026-02-31' }), /到期日期/);
+    assert.throws(() => store.updateProfile(id, { expiresAt: '2026-04-31' }), /到期日期/);
     assert.throws(() => store.updateProfile(id, { familyMembers: 1 }), /家庭共享人数/);
+    assert.throws(() => store.updateProfile(id, { familyMembers: true }), /家庭共享人数/);
     assert.throws(() => store.updateProfile(id, { monthlyPriceUsd: -5 }), /价格/);
+    assert.throws(() => store.updateProfile(id, { monthlyPriceUsd: false }), /价格/);
     assert.throws(() => store.updateProfile(id, { customWeight: 0 }), /权重/);
+    assert.throws(() => store.updateProfile(id, { customWeight: 0.001 }), /权重/);
+    assert.throws(() => store.updateProfile(id, { customWeight: true }), /权重/);
     assert.throws(() => store.updateProfile(id, { tierOverride: 'bogus' }), /档位/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1867,7 +1896,11 @@ test('createAccountsStore updateProfile validates & persists extended metadata a
 
 test('Quotas and Settings render smart scheduler controls, next-target badge, account profile modal, and zero middle dots', async () => {
   const now = Date.now();
-  const futureDays = days => new Date(now + days * 86400_000).toISOString().slice(0, 10);
+  const futureDays = days => {
+    const dt = new Date(now);
+    dt.setDate(dt.getDate() + days);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
   const accounts = [
     {
       id: 'acct-active',
@@ -2010,4 +2043,216 @@ test('Quotas and Settings render smart scheduler controls, next-target badge, ac
   assert.equal(savedProfiles[0].patch.expiresAt, '2026-12-20');
   assert.equal(savedProfiles[0].patch.familyMode, 'family-shared');
   assert.equal(savedProfiles[0].patch.treatAsFree, true);
+});
+
+test('native-client runningConversationIds filters terminated/killed sessions and pauseRunningTurns cancels active turns', async () => {
+  const canceled = [];
+  const summaries = {
+    'conv-running-2': { status: 2, killed: false, notFullyIdle: false },
+    'conv-running-4': { status: 4, killed: false, notFullyIdle: false },
+    'conv-yielded-live': { status: 1, killed: false, terminationReason: 0, notFullyIdle: true },
+    'conv-stopped-stale': { status: 1, killed: false, terminationReason: 2, notFullyIdle: true },
+    'conv-errored-stale': { status: 1, killed: false, terminationReason: 6, notFullyIdle: true },
+    'conv-killed-stale': { status: 2, killed: true, notFullyIdle: true }
+  };
+  const store = { getState: () => ({ trajectorySummaries: { summaries } }), dispatch() {} };
+  const svc = {
+    forkConversation() {},
+    cancelCascadeInvocation: async ({ cascadeId }) => { canceled.push(cascadeId); }
+  };
+  const rootEl = {
+    '__reactFiber$fixture': {
+      tag: 10,
+      type: {},
+      memoizedProps: { value: { store } },
+      return: {
+        tag: 10,
+        type: {},
+        memoizedProps: { value: svc },
+        return: null
+      }
+    }
+  };
+  const ctx = vm.createContext({
+    location: { pathname: '/c/conv-stopped-stale' },
+    document: {
+      querySelector: () => rootEl,
+      querySelectorAll: () => []
+    },
+    setTimeout: fn => { fn(); return 1; }
+  });
+  vm.runInContext(readFileSync(new URL('../lib/native-client.js', import.meta.url), 'utf8'), ctx);
+  const adapter = ctx.__agyNativeAdapter;
+
+  const running = [...adapter.runningConversationIds()].sort();
+  assert.deepEqual(running, ['conv-running-2', 'conv-running-4', 'conv-yielded-live']);
+  const res = await adapter.pauseRunningTurns();
+  assert.equal(res.paused, 3);
+  assert.deepEqual(canceled.sort(), ['conv-running-2', 'conv-running-4', 'conv-yielded-live']);
+});
+
+test('native-ui auto-switch isolates observedQuotaUsd per email and escalates wait policy to fallback at <= 2%', async () => {
+  const uiCode = readFileSync(new URL('../lib/native-ui.js', import.meta.url), 'utf8');
+  const helperCode = readFileSync(new URL('../lib/account-helpers.mjs', import.meta.url), 'utf8').replaceAll('export function', 'function');
+  const makeDomEl = tag => {
+    const attrs = new Map();
+    const listeners = new Map();
+    const el = {
+      tagName: String(tag || 'div').toUpperCase(),
+      dataset: {},
+      style: { setProperty() {}, removeProperty() {}, cssText: '' },
+      className: '',
+      textContent: '',
+      children: [],
+      isConnected: true,
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.get(k) ?? null; },
+      removeAttribute(k) { attrs.delete(k); },
+      append(...nodes) { this.children.push(...nodes); },
+      remove() { this.isConnected = false; },
+      contains(target) { return target === this || this.children.some(c => c?.contains?.(target)); },
+      addEventListener(evt, fn) { if (!listeners.has(evt)) listeners.set(evt, []); listeners.get(evt).push(fn); },
+      removeEventListener() {},
+      click() { for (const fn of (listeners.get('click') || [])) fn({ stopPropagation() {}, preventDefault() {} }); },
+      querySelector: () => null,
+      querySelectorAll: () => []
+    };
+    return el;
+  };
+  const bodyChildren = [];
+  const syncPayloads = [];
+  const switchCalls = [];
+  let pauseCalls = 0;
+  let currentEmail = 'alpha@example.com';
+  let currentFraction = 0.08;
+  const accountsPayload = {
+    activeId: 'acct-a',
+    accounts: [
+      { id: 'acct-a', email: 'alpha@example.com', name: 'Alpha', hasCredential: true, disabled: false, groups: [] },
+      { id: 'acct-b', email: 'beta@example.com', name: 'Beta', hasCredential: true, disabled: false, groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9 }] }] }
+    ]
+  };
+  let capturedEnv = null;
+  const ctx = vm.createContext({
+    console,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    AbortController,
+    location: { pathname: '/c/conv-1' },
+    localStorage: { _m: new Map(), getItem(k) { return this._m.get(k) ?? null; }, setItem(k, v) { this._m.set(k, String(v)); }, removeItem(k) { this._m.delete(k); } },
+    React: { createElement: () => null, Fragment: 'fragment', useSyncExternalStore: (_, g) => g(), Component: class {} },
+    ReactDOM: { createRoot: () => ({ render() {}, unmount() {} }) },
+    HC: () => null, IC: () => null, JC: () => null, Uy: () => null,
+    MutationObserver: class { observe() {} disconnect() {} },
+    window: { addEventListener() {}, removeEventListener() {} },
+    document: {
+      head: { append() {} },
+      body: { append(...nodes) { bodyChildren.push(...nodes); } },
+      documentElement: { setAttribute() {}, removeAttribute() {}, toggleAttribute() {}, style: { setProperty() {}, removeProperty() {} } },
+      title: '',
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: tag => makeDomEl(tag),
+      addEventListener() {},
+      removeEventListener() {}
+    },
+    __agyPanels: env => { capturedEnv = env; return { dispose() {} }; },
+    __agyInitialSettings: { enabled: true, multiAccount: true, autoSwitchAccount: true, autoSwitchThreshold: 10, autoSwitchRunningPolicy: 'wait', autoSwitchWaitFallback: 'pause' },
+    __agyNativeAdapter: {
+      capabilities: () => ({ email: currentEmail, name: 'Test', plan: 'Google AI Ultra', planId: 'g1-ultra-tier', model: 'Gemini 4 Carbon', models: [] }),
+      service: () => ({
+        retrieveUserQuotaSummary: async () => ({
+          response: {
+            groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: currentFraction, resetTimeMs: Date.now() + 3600_000 }] }]
+          }
+        })
+      }),
+      executionState: () => ({ conversationId: 'conv-1', status: 2 }),
+      runningConversationIds: () => ['conv-1'],
+      pauseRunningTurns: async () => { pauseCalls++; return { paused: 1 }; },
+      installPage: () => true,
+      wrap: el => el,
+      setEnabled() {}, setStageUpdates() {}, setEfficientIO() {}, setContextLimit() {}, setSidebarProjectLimit() {},
+      dispose() {}
+    },
+    __agyPowertoolsHost: raw => {
+      const msg = JSON.parse(raw);
+      if (msg.method === 'settings.get') {
+        ctx.__agyPowertoolsReceive(msg.id, { enabled: true, multiAccount: true, autoSwitchAccount: true, autoSwitchThreshold: 10, autoSwitchRunningPolicy: 'wait', autoSwitchWaitFallback: 'pause' });
+      } else if (msg.method === 'accounts.list') {
+        ctx.__agyPowertoolsReceive(msg.id, accountsPayload);
+      } else if (msg.method === 'accounts.syncActive') {
+        syncPayloads.push(msg.snapshot);
+        ctx.__agyPowertoolsReceive(msg.id, accountsPayload);
+      } else if (msg.method === 'quota.observe') {
+        ctx.__agyPowertoolsReceive(msg.id, { estimates: [{ bucketId: 'gemini-weekly', estimateUsd: currentEmail === 'alpha@example.com' ? 400 : 20, confidence: 'high' }] });
+      } else if (msg.method === 'accounts.autoSwitchCandidate') {
+        ctx.__agyPowertoolsReceive(msg.id, { candidate: accountsPayload.accounts[1], candidates: [{ account: accountsPayload.accounts[1], usableFrac: 0.9 }, { account: accountsPayload.accounts[0], usableFrac: 0.5 }], strategy: 'smart', cooldownRemainingMs: 0 });
+      } else if (msg.method === 'accounts.switch') {
+        switchCalls.push(msg);
+        ctx.__agyPowertoolsReceive(msg.id, { ok: true, relaunching: false, manualRestartRequired: true, account: accountsPayload.accounts[1], ...accountsPayload });
+      } else {
+        ctx.__agyPowertoolsReceive(msg.id, {});
+      }
+    }
+  });
+  vm.runInContext(`(() => { ${helperCode}\nglobalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, accountTierProfile, accountSupportsModel, evaluateAutoSwitchTrigger, rankAutoSwitchCandidates, selectAutoSwitchCandidate, normalizeModelCapability, officialTierCatalog }; })();`, ctx);
+  vm.runInContext(uiCode, ctx);
+  const flush = async () => { for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r)); };
+  await flush();
+  assert.ok(capturedEnv);
+
+  // 1. Refresh at 8% while task is running -> wait policy defers (no banner mounted) and populates Alpha's $400 weekly estimate
+  await capturedEnv.refreshAccountQuotas();
+  await flush();
+  const findByTestId = (node, id) => {
+    if (!node) return null;
+    if (node.dataset?.testid === id) return node;
+    for (const c of (node.children || [])) { const hit = findByTestId(c, id); if (hit) return hit; }
+    return null;
+  };
+  const findBanner = () => bodyChildren.find(n => n.dataset?.testid === 'agy-autoswitch-banner' && n.isConnected);
+  assert.equal(findBanner(), undefined);
+
+  // 2. Second refresh on Alpha records Alpha's own $400 observedQuotaUsd
+  await capturedEnv.refreshAccountQuotas();
+  await flush();
+  assert.equal(syncPayloads.at(-1).email, 'alpha@example.com');
+  assert.equal(syncPayloads.at(-1).observedQuotaUsd, 400);
+
+  // 3. Switch active email in-place to Beta & drop to 1% -> MUST NOT leak Alpha's $400 onto Beta, AND MUST escalate wait -> fallback banner!
+  currentEmail = 'beta@example.com';
+  currentFraction = 0.01;
+  await capturedEnv.refreshAccountQuotas();
+  await flush();
+  const betaSync = syncPayloads.find(p => p.email === 'beta@example.com');
+  assert.ok(betaSync);
+  assert.equal(betaSync.observedQuotaUsd, null, 'Alpha observedQuotaUsd must never contaminate Beta');
+
+  const banner = findBanner();
+  assert.ok(banner, 'expected critical <= 2% fallback banner while task is still running');
+  assert.ok(findByTestId(banner, 'agy-autoswitch-fallback-notice'));
+  assert.ok(findByTestId(banner, 'agy-autoswitch-force-now'));
+  // Closed picker menu must not carry role="listbox"
+  const closedListbox = (function scan(n) {
+    if (!n) return null;
+    if (n.getAttribute?.('role') === 'listbox') return n;
+    for (const c of (n.children || [])) { const hit = scan(c); if (hit) return hit; }
+    return null;
+  })(banner);
+  assert.equal(closedListbox, null);
+
+  // 4. Clicking primary fallback button pauses running turns and switches without wedging switchingInProgress when relaunching: false
+  findByTestId(banner, 'agy-autoswitch-now').click();
+  await flush();
+  assert.equal(pauseCalls, 1);
+  assert.equal(switchCalls.length, 1);
+  assert.equal(switchCalls[0].accountId, 'acct-b');
+  // Verify refreshAccountQuotas is NOT wedged after relaunching: false
+  const afterRes = await capturedEnv.refreshAccountQuotas();
+  assert.notEqual(afterRes?.skipped, true);
+
+  ctx.__agyPowertools.dispose();
 });
