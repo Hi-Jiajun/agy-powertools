@@ -1389,14 +1389,98 @@ test('QuickPopover reuses full panels across all 6 tabs with lazy loading, badge
   assert.equal(previewOn, true);
   assert.equal(beamUi.find(beamUi.renderSettings(), 'agy-beam-preview-toggle')?.props?.['aria-pressed'], true);
 
-  // Closed by default: zero lazy loads; ignores disabled 1% bucket, warns on 18% active bucket
+  // Closed by default: zero lazy loads; ignores disabled 1% bucket, warns on 18% active bucket and shows multiline tooltip + first-time alert callout
   let tree = ui.renderQuickPopover();
   const trigger = ui.find(tree, 'agy-titlebar-quick-trigger');
   assert.ok(trigger);
   assert.equal(ui.find(tree, 'agy-quick-trigger-badge')?.props?.['data-tone'], 'warning');
+  assert.equal(trigger.props['aria-label'], 'Powertools 快捷概览（低额度：Claude/GPT 5h 18%）');
+  const tipNode = ui.find(tree, 'agy-quick-trigger-tooltip');
+  assert.ok(tipNode);
+  const tipRows = ui.findAll(tipNode, n => n.props?.className === 'pt-qp-tip-row');
+  assert.equal(tipRows.length, 1);
+  assert.equal(tipRows[0].props['data-tone'], 'warning');
+  assert.equal(ui.collectText(tipRows[0]).trim(), '低额度：Claude/GPT 5h 18%');
+  assert.ok(ui.find(tree, 'agy-quick-alert-callout'));
   assert.equal(ui.find(tree, 'agy-quick-popover'), null);
   assert.equal(dashboardLoads.length, 0);
   assert.equal(proxyLoads, 0);
+
+  // Clicking "我知道了" hides both the callout and the corner dot for the current alert event (hover tooltip remains informative)
+  ui.find(tree, 'agy-quick-alert-ack').props.onClick();
+  tree = ui.renderQuickPopover();
+  assert.equal(ui.find(tree, 'agy-quick-alert-callout'), null);
+  assert.equal(ui.find(tree, 'agy-quick-trigger-badge'), null);
+  assert.ok(ui.find(tree, 'agy-quick-trigger-tooltip'));
+
+  // Multiline tooltip covers critical quota + warning quota + pending proxy on separate rows (zh-CN & en),
+  // and clicking "不再提醒" hides dot & callout permanently until restored in Settings
+  const critProxyUi = createPanelHarness(
+    {
+      activeId: 'acct-1',
+      accounts: [{
+        id: 'acct-1',
+        email: 'alice@example.com',
+        name: 'Alice Chen',
+        groups: [
+          { displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.06 }] },
+          { displayName: 'Claude and GPT models', buckets: [{ bucketId: 'c-w', window: 'weekly', remainingFraction: 0.19 }] }
+        ]
+      }]
+    },
+    { enabled: true, titlebarQuickPanel: true, language: 'zh-CN' },
+    { proxyStatus: () => ({ reason: 'not-applied', mismatch: true }) }
+  );
+  let critTree = critProxyUi.renderQuickPopover();
+  assert.equal(critProxyUi.find(critTree, 'agy-quick-trigger-badge')?.props?.['data-tone'], 'critical');
+  assert.ok(critProxyUi.find(critTree, 'agy-quick-alert-callout'));
+  const critTipBox = critProxyUi.find(critTree, 'agy-quick-trigger-tooltip');
+  assert.ok(critTipBox);
+  const critRows = critProxyUi.findAll(critTipBox, n => n.props?.className === 'pt-qp-tip-row');
+  assert.deepEqual(
+    critRows.map(r => [r.props['data-tone'], critProxyUi.collectText(r).trim()]),
+    [
+      ['critical', '额度告急：Gemini 5h 6%'],
+      ['warning', '低额度：Claude/GPT 周 19%'],
+      ['warning', '独立代理待重启生效']
+    ]
+  );
+  const critText = critProxyUi.collectText(critTipBox);
+  for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) assert.equal(critText.includes(forbidden), false);
+  // Click "不再提醒" -> hides dot & callout, reveals restore button in Settings; restoring brings them back
+  assert.equal(critProxyUi.find(critProxyUi.renderSettings(), 'agy-setting-row-quickBadgeMuted'), null);
+  critProxyUi.find(critTree, 'agy-quick-alert-mute').props.onClick();
+  critTree = critProxyUi.renderQuickPopover();
+  assert.equal(critProxyUi.find(critTree, 'agy-quick-alert-callout'), null);
+  assert.equal(critProxyUi.find(critTree, 'agy-quick-trigger-badge'), null);
+  const mutedSettings = critProxyUi.renderSettings();
+  const unmuteBtn = critProxyUi.find(mutedSettings, 'agy-quick-badge-unmute');
+  assert.ok(unmuteBtn);
+  unmuteBtn.props.onClick();
+  critTree = critProxyUi.renderQuickPopover();
+  assert.equal(critProxyUi.find(critTree, 'agy-quick-trigger-badge')?.props?.['data-tone'], 'critical');
+  assert.ok(critProxyUi.find(critTree, 'agy-quick-alert-callout'));
+
+  const enProxyUi = createPanelHarness(
+    { activeId: 'acct-1', accounts: [{ id: 'acct-1', email: 'alice@example.com', groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.8 }] }] }] },
+    { enabled: true, titlebarQuickPanel: true, language: 'en' },
+    { proxyStatus: () => ({ reason: 'config-changed', mismatch: true }) }
+  );
+  const enTree = enProxyUi.renderQuickPopover();
+  assert.equal(enProxyUi.find(enTree, 'agy-quick-trigger-badge')?.props?.['data-tone'], 'warning');
+  const enRows = enProxyUi.findAll(enProxyUi.find(enTree, 'agy-quick-trigger-tooltip'), n => n.props?.className === 'pt-qp-tip-row');
+  assert.deepEqual(enRows.map(r => enProxyUi.collectText(r).trim()), ['Proxy config changed, relaunch to apply']);
+
+  const healthyUi = createPanelHarness(
+    { activeId: 'acct-1', accounts: [{ id: 'acct-1', email: 'alice@example.com', groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.9 }] }] }] },
+    { enabled: true, titlebarQuickPanel: true, language: 'zh-CN' },
+    { proxyStatus: () => ({ reason: 'disabled', mismatch: false }) }
+  );
+  const healthyTree = healthyUi.renderQuickPopover();
+  assert.equal(healthyUi.find(healthyTree, 'agy-quick-trigger-badge'), null);
+  assert.equal(healthyUi.find(healthyTree, 'agy-quick-alert-callout'), null);
+  assert.equal(healthyUi.find(healthyTree, 'agy-quick-trigger-tooltip'), null);
+  assert.equal(healthyUi.find(healthyTree, 'agy-titlebar-quick-trigger')?.props?.['aria-label'], 'Powertools 快捷概览');
 
   // Open -> lazy loads once; all 6 full native components render cleanly with zero middle dots
   trigger.props.onClick();
