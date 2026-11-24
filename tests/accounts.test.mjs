@@ -300,7 +300,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
   });
   vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, officialTierCatalog, normalizeModelCapability, accountTierProfile, accountSupportsModel, evaluateAutoSwitchTrigger, rankAutoSwitchCandidates, selectAutoSwitchCandidate }; })();`, context);
   vm.runInContext(panelsCode, context);
-  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', titlebarQuickPanel: true, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, autoSwitchStrategy: 'smart', autoSwitchThreshold: 0, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'wait', proxyEnabled: false, ...opts };
+  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', titlebarQuickPanel: true, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, autoSwitchStrategy: 'smart', autoSwitchThreshold: 5, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'wait', autoSwitchWaitFallback: 'pause', proxyEnabled: false, ...opts };
   const panels = context.__agyPanels({
     version: '2.15.0',
     t: v => v,
@@ -1906,30 +1906,71 @@ test('Quotas and Settings render smart scheduler controls, next-target badge, ac
   ];
 
   const savedProfiles = [];
+  const settingChanges = [];
   const ui = createPanelHarness(
     { activeId: 'acct-active', accounts },
-    { multiAccount: true, autoSwitchAccount: true, autoSwitchStrategy: 'smart', autoSwitchThreshold: 5, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'pause' },
-    { onUpdateProfile: (id, patch) => savedProfiles.push({ id, patch }) }
+    { multiAccount: true, autoSwitchAccount: true, autoSwitchStrategy: 'smart', autoSwitchThreshold: 5, autoSwitchInclude3p: false, autoSwitchRunningPolicy: 'wait', autoSwitchWaitFallback: 'pause' },
+    { onUpdateProfile: (id, patch) => savedProfiles.push({ id, patch }), onChange: patch => settingChanges.push(patch) }
   );
 
-  // Settings displays all 4 new auto-switch rows when multiAccount && autoSwitchAccount are ON
+  // Settings displays all 5 auto-switch rows (including wait fallback) when policy is wait, and disables 0% threshold option
   const settingsTree = ui.renderSettings();
   assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchStrategy'));
   assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchThreshold'));
   assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchInclude3p'));
   assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchRunningPolicy'));
+  assert.ok(ui.find(settingsTree, 'agy-setting-row-autoSwitchWaitFallback'));
+  const zeroThreshOpt = ui.find(settingsTree, 'agy-autoswitch-threshold-0');
+  assert.ok(zeroThreshOpt);
+  assert.equal(zeroThreshOpt.props.disabled, true);
+  assert.equal(zeroThreshOpt.props.onClick, undefined);
+  assert.ok(String(zeroThreshOpt.props['data-disabled-reason'] || '').includes('待任务完成后切换'));
+  // Every strategy option carries rich hover detail metadata
+  for (const key of ['smart', 'priority', 'tier-first', 'weighted-quota', 'earliest-reset', 'cost-low', 'cost-high']) {
+    const opt = ui.find(settingsTree, `agy-autoswitch-strategy-${key}`);
+    assert.ok(opt, `missing strategy item ${key}`);
+    assert.ok(String(opt.props['data-detail'] || '').length > 15, `missing hover detail for ${key}`);
+    assert.equal(opt.props.title, undefined, `must not emit native title tooltip on hover-card item ${key}`);
+    assert.equal(/[（(]/.test(ui.collectText(opt)), false, `strategy option label must not contain parentheses: ${key}`);
+  }
+  for (const testId of [
+    'agy-autoswitch-threshold-0', 'agy-autoswitch-threshold-5', 'agy-autoswitch-threshold-10',
+    'agy-autoswitch-running-policy-wait', 'agy-autoswitch-running-policy-pause', 'agy-autoswitch-running-policy-force',
+    'agy-autoswitch-wait-fallback-pause', 'agy-autoswitch-wait-fallback-force'
+  ]) {
+    const opt = ui.find(settingsTree, testId);
+    assert.ok(opt, `missing option ${testId}`);
+    assert.equal(/[（(]/.test(ui.collectText(opt)), false, `option label must not contain parentheses: ${testId}`);
+  }
   const settingsText = ui.collectText(settingsTree);
   for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) assert.equal(settingsText.includes(forbidden), false);
+
+  // When running policy is pause, 0% threshold is enabled and wait fallback row is hidden; switching back to wait lifts 0% -> 5%
+  const pauseChanges = [];
+  const pauseUi = createPanelHarness(
+    { activeId: 'acct-active', accounts },
+    { multiAccount: true, autoSwitchAccount: true, autoSwitchThreshold: 0, autoSwitchRunningPolicy: 'pause' },
+    { onChange: patch => pauseChanges.push(patch) }
+  );
+  const pauseSettings = pauseUi.renderSettings();
+  assert.equal(pauseUi.find(pauseSettings, 'agy-setting-row-autoSwitchWaitFallback'), null);
+  assert.notEqual(pauseUi.find(pauseSettings, 'agy-autoswitch-threshold-0').props.disabled, true);
+  pauseUi.find(pauseSettings, 'agy-autoswitch-running-policy-wait').props.onClick();
+  assert.deepEqual(pauseChanges.map(c => ({ ...c })), [{ autoSwitchRunningPolicy: 'wait', autoSwitchThreshold: 5 }]);
 
   // Settings hides scheduling sub-rows when autoSwitchAccount is OFF
   const offAutoUi = createPanelHarness({ activeId: 'acct-active', accounts }, { multiAccount: true, autoSwitchAccount: false });
   assert.equal(offAutoUi.find(offAutoUi.renderSettings(), 'agy-setting-row-autoSwitchStrategy'), null);
 
-  // Quotas displays strategy selector, next-target badge on acct-soon, family/free/expiring/expired badges
+  // Quotas displays strategy selector with hover details, next-target badge on acct-soon, family/free/expiring/expired badges
   let quotasTree = ui.renderQuotas();
   assert.ok(ui.find(quotasTree, 'agy-quotas-strategy-select'));
+  assert.ok(String(ui.find(quotasTree, 'agy-quotas-strategy-select-smart')?.props?.['data-detail'] || '').length > 15);
   const soonRow = ui.find(quotasTree, 'agy-account-row-acct-soon');
-  assert.ok(ui.find(soonRow, 'agy-account-next-badge'));
+  const nextBadge = ui.find(soonRow, 'agy-account-next-badge');
+  assert.ok(nextBadge);
+  assert.ok(String(nextBadge.props['data-tip'] || '').includes('推荐理由'));
+  assert.equal(nextBadge.props.title, undefined);
   assert.ok(ui.find(soonRow, 'agy-account-family-badge'));
   assert.ok(ui.find(soonRow, 'agy-account-free-badge'));
   assert.ok(ui.find(soonRow, 'agy-account-expiring-badge'));
@@ -1948,6 +1989,16 @@ test('Quotas and Settings render smart scheduler controls, next-target badge, ac
   const dialog = ui.find(quotasTree, 'agy-account-profile-dialog');
   assert.ok(dialog);
   assert.ok(ui.find(dialog, 'agy-profile-preview'));
+  // Modal uses Antigravity-native Select (kT/mT, zero raw HTML <option> / <input type="date">) and includes ? HelpTip icons
+  assert.equal(ui.findAll(dialog, n => n.type === 'option').length, 0);
+  assert.equal(ui.findAll(dialog, n => n.type === 'select-menu').length, 3);
+  assert.equal(ui.findAll(dialog, n => n.type === 'input' && n.props?.type === 'date').length, 0);
+  assert.ok(ui.find(dialog, 'agy-profile-expires-cal-btn'));
+  for (const helpId of ['agy-help-tier', 'agy-help-expires', 'agy-help-family-mode', 'agy-help-price', 'agy-help-weight', 'agy-help-treat-free']) {
+    const helpBtn = ui.find(dialog, helpId);
+    assert.ok(helpBtn, `missing HelpTip ${helpId}`);
+    assert.ok(String(helpBtn.props['data-help'] || '').length > 15, `missing help explanation for ${helpId}`);
+  }
   ui.find(dialog, 'agy-profile-alias').props.onChange({ target: { value: '拼车主力' } });
   ui.find(dialog, 'agy-profile-expires').props.onChange({ target: { value: '2026-12-20' } });
   quotasTree = ui.renderQuotas();

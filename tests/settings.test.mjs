@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createSettingsStore, DEFAULT_SETTINGS } from '../lib/settings.mjs';
+import { createSettingsStore, DEFAULT_SETTINGS, normalizeSettings } from '../lib/settings.mjs';
 
 test('settings persist, merge safely, and reject unknown options without changing saved data', () => {
   const directory = mkdtempSync(join(tmpdir(), 'agy-settings-'));
@@ -64,9 +64,13 @@ test('settings persist, merge safely, and reject unknown options without changin
     assert.equal(store.get().accountQuotaWindow, '5h');
     assert.equal(store.get().autoSwitchAccount, false);
     assert.equal(store.get().autoSwitchStrategy, 'smart');
-    assert.equal(store.get().autoSwitchThreshold, 0);
+    assert.equal(store.get().autoSwitchThreshold, 5);
     assert.equal(store.get().autoSwitchInclude3p, false);
     assert.equal(store.get().autoSwitchRunningPolicy, 'wait');
+    assert.equal(store.get().autoSwitchWaitFallback, 'pause');
+    // Wait policy forbids enabling 0% depleted trigger
+    assert.throws(() => store.set({ autoSwitchThreshold: 0 }), /设置/);
+    assert.throws(() => store.set({ autoSwitchRunningPolicy: 'wait', autoSwitchThreshold: 0 }), /设置/);
     store.set({
       multiAccount: true,
       accountSwitcher: false,
@@ -76,7 +80,8 @@ test('settings persist, merge safely, and reject unknown options without changin
       autoSwitchStrategy: 'cost-low',
       autoSwitchThreshold: 10,
       autoSwitchInclude3p: true,
-      autoSwitchRunningPolicy: 'pause'
+      autoSwitchRunningPolicy: 'pause',
+      autoSwitchWaitFallback: 'force'
     });
     assert.equal(store.get().multiAccount, true);
     assert.equal(store.get().accountSwitcher, false);
@@ -87,6 +92,7 @@ test('settings persist, merge safely, and reject unknown options without changin
     assert.equal(store.get().autoSwitchThreshold, 10);
     assert.equal(store.get().autoSwitchInclude3p, true);
     assert.equal(store.get().autoSwitchRunningPolicy, 'pause');
+    assert.equal(store.get().autoSwitchWaitFallback, 'force');
     for (const strategy of ['smart', 'priority', 'tier-first', 'weighted-quota', 'earliest-reset', 'cost-low', 'cost-high']) {
       store.set({ autoSwitchStrategy: strategy });
       assert.equal(store.get().autoSwitchStrategy, strategy);
@@ -95,9 +101,18 @@ test('settings persist, merge safely, and reject unknown options without changin
       store.set({ autoSwitchThreshold: threshold });
       assert.equal(store.get().autoSwitchThreshold, threshold);
     }
+    // Switching back to wait while threshold is 0% automatically promotes threshold to 5%
+    store.set({ autoSwitchRunningPolicy: 'pause', autoSwitchThreshold: 0 });
+    assert.equal(store.get().autoSwitchThreshold, 0);
+    store.set({ autoSwitchRunningPolicy: 'wait' });
+    assert.equal(store.get().autoSwitchThreshold, 5);
     for (const policy of ['wait', 'pause', 'force']) {
       store.set({ autoSwitchRunningPolicy: policy });
       assert.equal(store.get().autoSwitchRunningPolicy, policy);
+    }
+    for (const fallback of ['pause', 'force']) {
+      store.set({ autoSwitchWaitFallback: fallback });
+      assert.equal(store.get().autoSwitchWaitFallback, fallback);
     }
     store.set({
       multiAccount: false,
@@ -106,9 +121,10 @@ test('settings persist, merge safely, and reject unknown options without changin
       accountQuotaWindow: '5h',
       autoSwitchAccount: false,
       autoSwitchStrategy: 'smart',
-      autoSwitchThreshold: 0,
+      autoSwitchThreshold: 5,
       autoSwitchInclude3p: false,
-      autoSwitchRunningPolicy: 'wait'
+      autoSwitchRunningPolicy: 'wait',
+      autoSwitchWaitFallback: 'pause'
     });
     assert.equal(store.get().proxyEnabled, false);
     assert.equal(store.get().proxyUrl, '');
@@ -138,8 +154,10 @@ test('settings persist, merge safely, and reject unknown options without changin
     store.set({language:'en',contextLimit:1000000});assert.equal(store.get().contextLimit,1000000);assert.equal(store.get().language,'en');
     store.set({contextLimit:256000});assert.equal(store.get().contextLimit,256000);
     store.set({contextLimit:0});assert.equal(store.get().contextLimit,0);
+    assert.equal(normalizeSettings({ autoSwitchRunningPolicy: 'wait', autoSwitchThreshold: 0 }).autoSwitchThreshold, 5);
+    assert.equal(normalizeSettings({ autoSwitchRunningPolicy: 'pause', autoSwitchThreshold: 0 }).autoSwitchThreshold, 0);
     const before = readFileSync(join(directory, 'settings.json'), 'utf8');
-    for (const value of [{ compact: 'false' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { composerQuotaHaloWindow: '1d' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {autoSwitchStrategy:'round-robin'}, {autoSwitchThreshold:20}, {autoSwitchInclude3p:'yes'}, {autoSwitchRunningPolicy:'kill'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
+    for (const value of [{ compact: 'false' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { composerQuotaHaloWindow: '1d' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {autoSwitchStrategy:'round-robin'}, {autoSwitchThreshold:20}, {autoSwitchInclude3p:'yes'}, {autoSwitchRunningPolicy:'kill'}, {autoSwitchWaitFallback:'wait'}, {autoSwitchWaitFallback:'invalid'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
     assert.equal(readFileSync(join(directory, 'settings.json'), 'utf8'), before);
     store.set(DEFAULT_SETTINGS); assert.deepEqual(store.get(), DEFAULT_SETTINGS);
   } finally { rmSync(directory, { recursive: true, force: true }); }
