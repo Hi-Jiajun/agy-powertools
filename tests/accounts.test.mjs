@@ -294,9 +294,9 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
   });
   vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, selectAutoSwitchCandidate }; })();`, context);
   vm.runInContext(panelsCode, context);
-  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, ...opts };
+  const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', compact: true, overviewQuota: false, titlebarQuickPanel: true, titlebarQuickPanelMode: 'full', titlebarQuickPanelTabs: { overview: 'full', requests: 'full', errors: 'full', quota: 'full', pricing: 'full', settings: 'full' }, composerQuotaHalo: false, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, proxyEnabled: false, ...opts };
   const panels = context.__agyPanels({
-    version: '2.13.2',
+    version: '2.14.3',
     t: v => v,
     defaults: currentOpts,
     options: () => currentOpts,
@@ -305,11 +305,18 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     accounts: () => accountsData,
     account: () => hooks.account ?? null,
     accountFetchedAt: () => hooks.accountFetchedAt ?? null,
+    dashboard: () => typeof hooks.dashboard === 'function' ? hooks.dashboard() : (hooks.dashboard ?? null),
+    proxyStatus: () => typeof hooks.proxyStatus === 'function' ? hooks.proxyStatus() : (hooks.proxyStatus ?? null),
     capabilities: () => hooks.capabilities ?? { plan: 'Google AI Ultra', planId: 'g1-ultra-tier', email: 'alice@example.com', name: 'Alice Chen' },
     estimates: () => hooks.estimates ?? [],
     subscribe: () => () => {},
     revision: () => 0,
+    request: () => Promise.resolve({ status: 'idle' }),
     change: patch => { Object.assign(currentOpts, patch); hooks.onChange?.(patch); return Promise.resolve(); },
+    loadDashboard: force => { hooks.onLoadDashboard?.(force); return Promise.resolve(typeof hooks.dashboard === 'function' ? hooks.dashboard() : hooks.dashboard); },
+    loadAccounts: () => { hooks.onLoadAccounts?.(); return Promise.resolve(accountsData); },
+    loadProxyStatus: () => { hooks.onLoadProxyStatus?.(); return Promise.resolve(typeof hooks.proxyStatus === 'function' ? hooks.proxyStatus() : hooks.proxyStatus); },
+    openManagementTab: tab => hooks.onOpenManagementTab?.(tab),
     openNativeSettings: () => hooks.onOpenSettings?.(),
     refreshAccountQuotas: id => {
       hooks.onRefreshQuotas?.(id);
@@ -317,12 +324,24 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     },
     refreshAccountCredentials: id => { hooks.onRefreshCredentials?.(id); return Promise.resolve({ ok: true }); }
   });
+  function renderChild(node) {
+    const prevComp = activeComponent;
+    const prevIdx = hookIdx;
+    activeComponent = `${prevComp}>${node.type.name || 'fn'}:${node.props?.key ?? ''}`;
+    hookIdx = 0;
+    try {
+      return node.type({ ...node.props, children: node.children });
+    } finally {
+      activeComponent = prevComp;
+      hookIdx = prevIdx;
+    }
+  }
   function collectText(node) {
     if (node == null || typeof node === 'boolean') return '';
     if (typeof node === 'string' || typeof node === 'number') return String(node);
     if (Array.isArray(node)) return node.map(collectText).join(' ');
     if (typeof node === 'object') {
-      if (typeof node.type === 'function') return collectText(node.type({ ...node.props, children: node.children }));
+      if (typeof node.type === 'function') return collectText(renderChild(node));
       const children = Array.isArray(node.children) ? node.children : [node.children];
       return [collectText(children), collectText(node.props?.label), collectText(node.props?.rightElement), collectText(node.props?.extraContent)].filter(Boolean).join(' ');
     }
@@ -332,7 +351,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     if (!node || typeof node !== 'object') return null;
     if (Array.isArray(node)) { for (const item of node) { const r = find(item, id); if (r) return r; } return null; }
     if (node.props?.['data-testid'] === id) return node;
-    if (typeof node.type === 'function') return find(node.type({ ...node.props, children: node.children }), id);
+    if (typeof node.type === 'function') return find(renderChild(node), id);
     for (const value of [...(Array.isArray(node.children) ? node.children : [node.children]), node.props?.label, node.props?.rightElement, node.props?.extraContent]) {
       const r = find(value, id);
       if (r) return r;
@@ -343,7 +362,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     if (!node || typeof node !== 'object') return out;
     if (Array.isArray(node)) { for (const item of node) findAll(item, pred, out); return out; }
     if (pred(node)) out.push(node);
-    if (typeof node.type === 'function') return findAll(node.type({ ...node.props, children: node.children }), pred, out);
+    if (typeof node.type === 'function') return findAll(renderChild(node), pred, out);
     for (const value of [...(Array.isArray(node.children) ? node.children : [node.children]), node.props?.label, node.props?.rightElement, node.props?.extraContent]) {
       findAll(value, pred, out);
     }
@@ -353,6 +372,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     renderOverview: dashboard => { activeComponent = 'overview'; hookIdx = 0; return panels.Overview({ dashboard }); },
     renderEventTable: (dashboard, errors = false) => { activeComponent = errors ? 'errors' : 'requests'; hookIdx = 0; return panels.EventTable({ dashboard, errors }); },
     renderSwitcher: () => { activeComponent = 'switcher'; hookIdx = 0; return panels.AccountSwitcher(); },
+    renderQuickPopover: () => { activeComponent = 'quick-popover'; hookIdx = 0; return panels.QuickPopover(); },
     renderOverviewQuota: () => { activeComponent = 'overview-quota'; hookIdx = 0; return panels.OverviewQuota(); },
     renderQuotas: () => { activeComponent = 'quotas'; hookIdx = 0; return panels.Quotas(); },
     renderSettings: () => { activeComponent = 'settings'; hookIdx = 0; return panels.Settings(); },
@@ -1298,4 +1318,254 @@ test('Quotas and AccountSwitcher fuse live active data, fix header identity drif
   const driftedAcct1Row = driftUi.find(driftQuotas, 'agy-account-row-acct-1');
   assert.ok(driftUi.collectText(driftedAcct1Row).includes('90%'));
   assert.equal(driftUi.collectText(driftedAcct1Row).includes('35%'), false);
+});
+
+test('QuickPopover supports full (default), compact, and custom per-tab modes with lazy loading, tab memory, badge, and zero middle dots', async () => {
+  const now = Date.now();
+  const dashboardLoads = [];
+  let proxyLoads = 0;
+  const openedTabs = [];
+  const changes = [];
+  let proxyState = { reason: 'active', mismatch: false };
+
+  const sampleDashboard = {
+    activeAccountEmail: 'alice@example.com',
+    accountEmails: ['alice@example.com', 'bob@example.com'],
+    pricing: { rates: [{ model: 'gemini-4-neon', input: 2, output: 12, cache: 0.2 }] },
+    requests: [
+      { id: 'r1', timestampMs: now - 3600_000, model: 'Gemini 2.5 Pro', inputTokens: 1000, cacheReadTokens: 3000, outputTokens: 500, costUsd: 0.12, status: 'success', tps: 42, ttftMs: 1200, cacheHitPercent: 75, conversationId: 'conv-1', accountEmail: 'alice@example.com' },
+      { id: 'r2', timestampMs: now - 3200_000, model: 'Claude Sonnet 4', inputTokens: 800, cacheReadTokens: 200, outputTokens: 400, costUsd: 0.25, status: 'error', tps: 20, ttftMs: 900, cacheHitPercent: 20, conversationId: 'conv-1', accountEmail: 'alice@example.com' },
+      { id: 'r3', timestampMs: now - 2400_000, model: 'Gemini 2.5 Flash', inputTokens: 500, cacheReadTokens: 1500, outputTokens: 200, costUsd: 0.03, status: 'success', conversationId: 'conv-2', accountEmail: 'alice@example.com' },
+      { id: 'r4', timestampMs: now - 1800_000, model: 'GPT-5', inputTokens: 600, cacheReadTokens: 400, outputTokens: 300, costUsd: 0.15, status: 'success', conversationId: 'conv-2', accountEmail: 'alice@example.com' },
+      { id: 'r5', timestampMs: now - 900_000, model: 'Gemini 4 Neon', inputTokens: 400, cacheReadTokens: 200, outputTokens: 100, costUsd: 0.05, status: 'success', conversationId: 'conv-1', accountEmail: 'alice@example.com' },
+      { id: 'r6', timestampMs: now - 700_000, model: 'Gemini 4 Hydrogen', inputTokens: 300, cacheReadTokens: 100, outputTokens: 100, costUsd: 0.02, status: 'success', conversationId: 'conv-1', accountEmail: 'alice@example.com' },
+      { id: 'r-bob', timestampMs: now - 600_000, model: 'Bob Only Model', inputTokens: 99999, cacheReadTokens: 0, outputTokens: 1, costUsd: 9.99, status: 'success', conversationId: 'conv-bob', accountEmail: 'bob@example.com' }
+    ],
+    errors: [
+      { id: 'e1', timestampMs: now - 3200_000, model: 'Claude Sonnet 4', error: 'HTTP 429 rate limited', status: 'error', conversationId: 'conv-1', accountEmail: 'alice@example.com' }
+    ]
+  };
+
+  const accountsData = {
+    activeId: 'acct-1',
+    accounts: [
+      {
+        id: 'acct-1',
+        email: 'alice@example.com',
+        name: 'Alice Chen',
+        alias: '主力号',
+        tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+        disabled: false,
+        hasCredential: true,
+        groups: [
+          { displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.82, resetTimeMs: now + 3600_000 }, { bucketId: 'g-w', window: 'weekly', remainingFraction: 0.64, resetTimeMs: now + 4 * 86400_000 }] },
+          { displayName: 'Claude and GPT models', buckets: [{ bucketId: 'c-5h', window: '5h', remainingFraction: 0.21, resetTimeMs: now + 3600_000 }] },
+          { displayName: 'Gemini 4 Argon', buckets: [{ bucketId: 'a-w', window: 'weekly', remainingFraction: 0.95, resetTimeMs: now + 5 * 86400_000 }] }
+        ]
+      },
+      {
+        id: 'acct-2',
+        email: 'bob@example.com',
+        name: 'Bob Lin',
+        alias: '备用号',
+        tier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+        disabled: false,
+        hasCredential: true,
+        groups: [
+          { displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.95, resetTimeMs: now + 3600_000 }] }
+        ]
+      }
+    ]
+  };
+
+  // 1. Default FULL mode: reuses complete Overview, EventTable, Quotas, Pricing, Settings with unified '设置' tab name
+  const fullUi = createPanelHarness(
+    accountsData,
+    { enabled: true, titlebarQuickPanel: true, titlebarQuickPanelMode: 'full', multiAccount: true, overviewRange: '24h' },
+    {
+      dashboard: sampleDashboard,
+      account: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remaining: { case: 'remainingFraction', value: 0.82 }, resetTime: { seconds: String(Math.floor((now + 3600_000) / 1000)) } }] }] },
+      proxyStatus: () => proxyState,
+      onLoadDashboard: force => dashboardLoads.push(force),
+      onLoadProxyStatus: () => { proxyLoads++; },
+      onOpenManagementTab: tab => openedTabs.push(tab),
+      onChange: patch => changes.push(patch)
+    }
+  );
+
+  // Settings page exposes titlebarQuickPanel toggle and mode selector (hides custom matrix until custom selected)
+  const settingsTree = fullUi.renderSettings();
+  assert.ok(fullUi.find(settingsTree, 'agy-setting-titlebarQuickPanel'));
+  assert.ok(fullUi.find(settingsTree, 'agy-setting-row-titlebarQuickPanelMode'));
+  assert.equal(fullUi.find(settingsTree, 'agy-setting-row-titlebarQuickPanelTabs'), null);
+
+  // Closed by default: zero background load calls; low 21% active account bucket displays warning dot on trigger
+  let tree = fullUi.renderQuickPopover();
+  const trigger = fullUi.find(tree, 'agy-titlebar-quick-trigger');
+  assert.ok(trigger);
+  assert.equal(fullUi.find(tree, 'agy-quick-popover'), null);
+  assert.equal(dashboardLoads.length, 0);
+  assert.equal(proxyLoads, 0);
+
+  // Open popover -> lazy loads dashboard(false) & proxyStatus; full mode shows all 6 tabs with '设置'
+  trigger.props.onClick();
+  assert.deepEqual(dashboardLoads, [false]);
+  assert.equal(proxyLoads, 1);
+
+  tree = fullUi.renderQuickPopover();
+  const pop = fullUi.find(tree, 'agy-quick-popover');
+  assert.ok(pop);
+  assert.equal(pop.props.className, 'pt-qp-pop');
+  assert.equal(fullUi.collectText(fullUi.find(pop, 'agy-quick-tab-settings')), '设置');
+  assert.ok(fullUi.find(pop, 'agy-quick-tab-pricing'));
+  assert.equal(fullUi.find(pop, 'agy-quick-view-overview')?.props?.['data-quick-mode'], 'full');
+  assert.ok(fullUi.find(pop, 'agy-usage-heatmap'));
+  assert.ok(fullUi.find(pop, 'agy-usage-distribution'));
+
+  // Full Requests, Errors, Quotas, Pricing, Settings all render full native components inside QuickPopover
+  fullUi.find(tree, 'agy-quick-tab-requests').props.onClick();
+  tree = fullUi.renderQuickPopover();
+  assert.ok(fullUi.find(tree, 'agy-requests-table'));
+
+  fullUi.find(tree, 'agy-quick-tab-errors').props.onClick();
+  tree = fullUi.renderQuickPopover();
+  assert.ok(fullUi.find(tree, 'agy-errors-table'));
+
+  fullUi.find(tree, 'agy-quick-tab-quota').props.onClick();
+  tree = fullUi.renderQuickPopover();
+  assert.equal(fullUi.find(tree, 'agy-quick-view-quota')?.props?.['data-quick-mode'], 'full');
+  assert.ok(fullUi.find(tree, 'agy-accounts-overview'));
+  assert.ok(fullUi.find(tree, 'agy-accounts-table'));
+  assert.ok(fullUi.find(tree, 'agy-add-account'));
+  assert.ok(fullUi.find(tree, 'agy-autoswitch-toggle'));
+
+  fullUi.find(tree, 'agy-quick-tab-pricing').props.onClick();
+  tree = fullUi.renderQuickPopover();
+  assert.ok(fullUi.find(tree, 'agy-price-table'));
+
+  fullUi.find(tree, 'agy-quick-tab-settings').props.onClick();
+  tree = fullUi.renderQuickPopover();
+  assert.equal(fullUi.find(tree, 'agy-quick-view-settings')?.props?.['data-quick-mode'], 'full');
+  assert.ok(fullUi.find(tree, 'agy-setting-row-proxyEnabled'));
+  assert.ok(fullUi.find(tree, 'agy-setting-row-titlebarQuickPanelMode'));
+  assert.ok(fullUi.find(tree, 'agy-about-version'));
+
+  // Zero middle dots across all 6 full tabs + manual refresh works
+  await fullUi.find(tree, 'agy-quick-refresh').props.onClick();
+  assert.deepEqual(dashboardLoads, [false, true]);
+  for (const tabKey of ['overview', 'requests', 'errors', 'quota', 'pricing', 'settings']) {
+    fullUi.find(fullUi.renderQuickPopover(), `agy-quick-tab-${tabKey}`).props.onClick();
+    const tabText = fullUi.collectText(fullUi.find(fullUi.renderQuickPopover(), 'agy-quick-popover'));
+    for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) {
+      assert.equal(tabText.includes(forbidden), false, `Forbidden middle dot in full tab ${tabKey}: ${forbidden}`);
+    }
+  }
+
+  // 2. COMPACT mode: 5 streamlined tabs, fixed non-overlapping quota chips, native switches in compact settings, risk guard, tab memory
+  const compactChanges = [];
+  const compactOpened = [];
+  const compactUi = createPanelHarness(
+    accountsData,
+    { enabled: true, titlebarQuickPanel: true, titlebarQuickPanelMode: 'compact', compact: true, overviewQuota: false, composerQuotaHalo: false, multiAccount: true, proxyEnabled: false, overviewRange: '24h' },
+    {
+      dashboard: sampleDashboard,
+      account: null,
+      proxyStatus: () => proxyState,
+      onOpenManagementTab: tab => compactOpened.push(tab),
+      onChange: patch => compactChanges.push(patch)
+    }
+  );
+  let cTree = compactUi.renderQuickPopover();
+  assert.equal(compactUi.find(cTree, 'agy-quick-trigger-badge')?.props?.['data-tone'], 'warning');
+  compactUi.find(cTree, 'agy-titlebar-quick-trigger').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.equal(compactUi.find(cTree, 'agy-quick-tab-pricing'), null);
+  assert.equal(compactUi.find(cTree, 'agy-quick-view-overview')?.props?.['data-quick-mode'], 'compact');
+  assert.equal(compactUi.findAll(compactUi.find(cTree, 'agy-quick-heatmap'), n => n.props?.className === 'pt-qp-heat-cell').length, 112);
+
+  // Compact Requests & Errors
+  compactUi.find(cTree, 'agy-quick-tab-requests').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.ok(compactUi.find(cTree, 'agy-quick-requests-table'));
+  compactUi.find(cTree, 'agy-quick-tab-errors').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.ok(compactUi.find(cTree, 'agy-quick-errors-table'));
+
+  // Compact Quota uses full-width .pt-acct-quota-chip (never fixed 66px .pt-ov-qpill) and opens SwitchConfirmModal
+  compactUi.find(cTree, 'agy-quick-tab-quota').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.equal(compactUi.find(cTree, 'agy-quick-view-quota')?.props?.['data-quick-mode'], 'compact');
+  assert.ok(compactUi.find(cTree, 'agy-quick-autoswitch'));
+  assert.ok(compactUi.findAll(cTree, n => n.props?.className === 'pt-acct-quota-chip').length > 0);
+  assert.equal(compactUi.findAll(cTree, n => n.props?.className === 'pt-ov-qpill').length, 0);
+  compactUi.find(cTree, 'agy-quick-switch-acct-2').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.ok(compactUi.find(cTree, 'agy-account-switch-dialog'));
+  compactUi.find(cTree, 'agy-switch-cancel').props.onClick();
+
+  // Compact Settings uses native switches + mode selector (zero pill chips)
+  compactUi.find(compactUi.renderQuickPopover(), 'agy-quick-tab-settings').props.onClick();
+  cTree = compactUi.renderQuickPopover();
+  assert.equal(compactUi.find(cTree, 'agy-quick-view-settings')?.props?.['data-quick-mode'], 'compact');
+  assert.equal(compactUi.find(cTree, 'agy-quick-toggle-compact')?.type, 'switch');
+  assert.ok(compactUi.find(cTree, 'agy-quick-mode-select'));
+  assert.equal(compactUi.findAll(cTree, n => n.props?.className === 'pt-qp-chip').length, 0);
+  compactUi.find(cTree, 'agy-quick-toggle-compact').props.onCheckedChange(false);
+  compactUi.find(cTree, 'agy-quick-toggle-overviewQuota').props.onCheckedChange(true);
+  assert.deepEqual(compactChanges.map(c => ({ ...c })), [{ compact: false }, { overviewQuota: true }]);
+
+  // Compact Settings when multiAccount OFF preserves risk guard and navigates to settings
+  const singleCompactOpened = [];
+  const singleCompactChanges = [];
+  const singleCompactUi = createPanelHarness(
+    accountsData,
+    { enabled: true, titlebarQuickPanel: true, titlebarQuickPanelMode: 'compact', multiAccount: false, overviewRange: '24h' },
+    { dashboard: sampleDashboard, proxyStatus: () => ({ reason: 'not-applied', mismatch: true }), onOpenManagementTab: tab => singleCompactOpened.push(tab), onChange: patch => singleCompactChanges.push(patch) }
+  );
+  singleCompactUi.find(singleCompactUi.renderQuickPopover(), 'agy-titlebar-quick-trigger').props.onClick();
+  singleCompactUi.find(singleCompactUi.renderQuickPopover(), 'agy-quick-tab-settings').props.onClick();
+  const scTree = singleCompactUi.renderQuickPopover();
+  assert.ok(singleCompactUi.collectText(singleCompactUi.find(scTree, 'agy-quick-action-proxy')).includes('代理待重启'));
+  singleCompactUi.find(scTree, 'agy-quick-action-multiAccount').props.onClick();
+  assert.equal(singleCompactChanges.some(c => Object.hasOwn(c, 'multiAccount')), false);
+  assert.deepEqual(singleCompactOpened, ['settings']);
+  assert.equal(singleCompactUi.find(singleCompactUi.renderQuickPopover(), 'agy-quick-popover'), null);
+  // Reopen remembers last active tab ('settings')
+  singleCompactUi.find(singleCompactUi.renderQuickPopover(), 'agy-titlebar-quick-trigger').props.onClick();
+  assert.ok(singleCompactUi.find(singleCompactUi.renderQuickPopover(), 'agy-quick-view-settings'));
+
+  // 3. CUSTOM mode: per-tab full/compact/hidden + Settings custom configurator
+  const customChanges = [];
+  const customUi = createPanelHarness(
+    accountsData,
+    {
+      enabled: true,
+      titlebarQuickPanel: true,
+      titlebarQuickPanelMode: 'custom',
+      titlebarQuickPanelTabs: { overview: 'compact', requests: 'compact', errors: 'hidden', quota: 'full', pricing: 'hidden', settings: 'full' },
+      multiAccount: true,
+      overviewRange: '24h'
+    },
+    { dashboard: sampleDashboard, onChange: patch => customChanges.push(patch) }
+  );
+  const customSettings = customUi.renderSettings();
+  assert.ok(customUi.find(customSettings, 'agy-setting-row-titlebarQuickPanelTabs'));
+  customUi.find(customSettings, 'agy-quick-custom-tab-overview-full').props.onClick();
+  assert.equal(customChanges.at(-1)?.titlebarQuickPanelTabs?.overview, 'full');
+
+  // Re-set overview back to compact and verify QuickPopover respects mixed per-tab configuration
+  customUi.find(customUi.renderSettings(), 'agy-quick-custom-tab-overview-compact').props.onClick();
+  customUi.find(customUi.renderQuickPopover(), 'agy-titlebar-quick-trigger').props.onClick();
+  let custPop = customUi.renderQuickPopover();
+  assert.equal(customUi.find(custPop, 'agy-quick-tab-errors'), null);
+  assert.equal(customUi.find(custPop, 'agy-quick-tab-pricing'), null);
+  assert.equal(customUi.find(custPop, 'agy-quick-view-overview')?.props?.['data-quick-mode'], 'compact');
+  customUi.find(custPop, 'agy-quick-tab-quota').props.onClick();
+  custPop = customUi.renderQuickPopover();
+  assert.equal(customUi.find(custPop, 'agy-quick-view-quota')?.props?.['data-quick-mode'], 'full');
+  assert.ok(customUi.find(custPop, 'agy-accounts-overview'));
+
+  // Disabled titlebarQuickPanel renders null
+  const offQuickUi = createPanelHarness(accountsData, { enabled: true, titlebarQuickPanel: false });
+  assert.equal(offQuickUi.renderQuickPopover(), null);
 });

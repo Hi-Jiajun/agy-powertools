@@ -101,7 +101,7 @@
 
 - **Multilingual UI (`English` / `简体中文` / `繁體中文`)**: Localizes Powertools panels, common Antigravity menus, permission dialogs, settings, and Swarm iframes while leaving chat text and code blocks untouched.
 - **Context and speed telemetry**: Adds a context usage ring (with cache reuse, compaction count, and Orchestrator planner/executor bars) and a speed dial (`tok/s`, TTFT, model vs. tool duration, and estimated session cost) next to the composer, including subagent stats.
-- **Local usage and request dashboard**: Adds a `Powertools` sidebar page with usage overview (53-week heatmap, token/cost donuts, model table), per-request log, short-interval cache anomaly flags, one-click error copy, quota estimates, and official API pricing refresh.
+- **Local usage and request dashboard**: Adds a `Powertools` sidebar page plus a toggleable top-right titlebar quick popover (Full, Compact, or per-tab Custom mode) with usage overview (53-week heatmap, token/cost donuts, model table), per-request log, short-interval cache anomaly flags, one-click error copy, quota estimates, and official API pricing refresh.
 - **Compact layout and live stage updates**: Keeps your client font size while tightening line height and block spacing; reports short progress updates during multi-step tool runs and folds them into the top duration header once finished.
 - **Session branching and inline editing**: Fork a new chat from any reply or conversation menu with full history preserved (including chats that used subagents), or edit a sent message in place using Antigravity's native composer.
 - **Multi-account switching (off by default)**: Uses Windows Credential Manager, macOS Keychain, or Linux Secret Service to keep multiple Google accounts isolated without plaintext tokens; check 5-hour/weekly quotas and switch from the sidebar, with optional auto-switch on depletion.
@@ -175,6 +175,8 @@ Every setting applies live in **Powertools -> Settings** and saves automatically
 | Speed & statistics | On | Shows the speed dial and opens session telemetry and estimated cost |
 | Task progress | On | Collapsible Overview section with checklist progress, live phase, and step durations |
 | Show quota in Overview | Off | Collapsible Overview section showing 5-hour and weekly remaining quotas |
+| Titlebar quick overview | On | Shows a toggleable Powertools quick popover trigger in the top-right titlebar with low-quota / pending-proxy status dot |
+| Quick popover content mode | `Full` | Choose `Full` (complete panels), `Compact` (streamlined views), or `Custom` (per-tab Full / Compact / Hide) when enabled |
 | Composer quota halo | Off | Draws remaining quota clockwise around the composer card (emerald, amber, or red) |
 | Quota halo window | `Auto (lower)` | Choose `Auto (lower)`, `Weekly limit`, or `5-hour limit` when the halo is enabled |
 | Subagent context & telemetry | On | Shows per-subagent model, context usage, tokens, cache hit rate, speed, and cost |

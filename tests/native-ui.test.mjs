@@ -929,3 +929,97 @@ test('userBubbleStrength updates CSS variables and readable foreground contrast,
   assert.equal(styleProps.has('--agy-bubble-bg'), false);
   assert.equal(styleProps.has('--agy-bubble-fg'), false);
 });
+
+test('titlebarQuickPanel mounts left of titlebar-more-actions, falls back to overview/aux toggles, and unmounts when disabled', async () => {
+  const makeTitlebarEnv = (selectors) => {
+    const p = page(true);
+    const mounts = [];
+    let unmounted = 0;
+    const parent = {
+      children: [],
+      insertBefore(node, before) {
+        const idx = this.children.indexOf(node);
+        if (idx >= 0) this.children.splice(idx, 1);
+        node.isConnected = true;
+        if (before && this.children.includes(before)) this.children.splice(this.children.indexOf(before), 0, node);
+        else this.children.push(node);
+        for (let i = 0; i < this.children.length; i++) this.children[i].nextSibling = this.children[i + 1] || null;
+        mounts.push({ node, before });
+      }
+    };
+    const anchors = {};
+    for (const key of ['more', 'overview', 'aux']) {
+      anchors[key] = { id: key, isConnected: true, parentElement: parent, nextSibling: null };
+      if (selectors[key]) parent.children.push(anchors[key]);
+    }
+    for (let i = 0; i < parent.children.length; i++) parent.children[i].nextSibling = parent.children[i + 1] || null;
+    p.context.ReactDOM = { createRoot() { return { render() {}, unmount() { unmounted++; } }; } };
+    p.context.__agyNativeAdapter.installPage = () => true;
+    let capturedEnv = null;
+    p.context.__agyPanels = env => {
+      capturedEnv = env;
+      return { Page: () => null, Sidebar: () => null, QuickPopover: () => null, dispose() {} };
+    };
+    p.document.querySelector = sel => {
+      if (sel === '[data-testid="titlebar-more-actions"]' && selectors.more) return anchors.more;
+      if (sel === '[data-testid="toggle-overview-panel"]' && selectors.overview) return anchors.overview;
+      if (sel === '[data-testid="toggle-aux-sidebar"]' && selectors.aux) return anchors.aux;
+      return null;
+    };
+    return { p, mounts, anchors, parent, getUnmounted: () => unmounted, getEnv: () => capturedEnv };
+  };
+
+  // 1. Primary anchor: mounts to the left of titlebar-more-actions even on non-conversation routes (before !data return)
+  const primary = makeTitlebarEnv({ more: true, overview: true, aux: true });
+  let currentSettings = { enabled: true, titlebarQuickPanel: true };
+  primary.p.context.__agyPowertoolsHost = raw => {
+    const req = JSON.parse(raw);
+    queueMicrotask(() => {
+      if (req.method === 'settings.set') {
+        currentSettings = { ...currentSettings, ...req.settings };
+        primary.p.context.__agyPowertoolsReceive(req.id, currentSettings);
+      } else if (req.method === 'settings.get') {
+        primary.p.context.__agyPowertoolsReceive(req.id, currentSettings);
+      } else {
+        primary.p.context.__agyPowertoolsReceive(req.id, {});
+      }
+    });
+  };
+  primary.p.context.__agyInitialSettings = { enabled: true, titlebarQuickPanel: true };
+  vm.runInContext(source, primary.p.context);
+  assert.equal(primary.mounts.length, 1);
+  assert.equal(primary.mounts[0].node.dataset.agyPowertoolsRoot, 'titlebar-quick');
+  assert.equal(primary.mounts[0].before, primary.anchors.more);
+  assert.equal(typeof primary.getEnv().proxyStatus, 'function');
+
+  // Disabling titlebarQuickPanel unmounts cleanly
+  await primary.getEnv().change({ titlebarQuickPanel: false });
+  assert.equal(primary.mounts[0].node.isConnected, false);
+  assert.equal(primary.getUnmounted(), 1);
+  primary.p.context.__agyPowertools.dispose();
+
+  // 2. Fallback to toggle-overview-panel when titlebar-more-actions is absent
+  const fallbackOverview = makeTitlebarEnv({ more: false, overview: true, aux: true });
+  fallbackOverview.p.context.__agyInitialSettings = { enabled: true, titlebarQuickPanel: true };
+  vm.runInContext(source, fallbackOverview.p.context);
+  assert.equal(fallbackOverview.mounts.length, 1);
+  assert.equal(fallbackOverview.mounts[0].node.dataset.agyPowertoolsRoot, 'titlebar-quick');
+  assert.equal(fallbackOverview.mounts[0].before, fallbackOverview.anchors.overview);
+  fallbackOverview.p.context.__agyPowertools.dispose();
+  assert.equal(fallbackOverview.mounts[0].node.isConnected, false);
+
+  // 3. Fallback to toggle-aux-sidebar when both primary and overview toggle are absent
+  const fallbackAux = makeTitlebarEnv({ more: false, overview: false, aux: true });
+  fallbackAux.p.context.__agyInitialSettings = { enabled: true, titlebarQuickPanel: true };
+  vm.runInContext(source, fallbackAux.p.context);
+  assert.equal(fallbackAux.mounts.length, 1);
+  assert.equal(fallbackAux.mounts[0].before, fallbackAux.anchors.aux);
+  fallbackAux.p.context.__agyPowertools.dispose();
+
+  // 4. Disabled initially: does not mount at all
+  const disabled = makeTitlebarEnv({ more: true, overview: true, aux: true });
+  disabled.p.context.__agyInitialSettings = { enabled: true, titlebarQuickPanel: false };
+  vm.runInContext(source, disabled.p.context);
+  assert.equal(disabled.mounts.length, 0);
+  disabled.p.context.__agyPowertools.dispose();
+});
