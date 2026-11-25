@@ -1704,23 +1704,176 @@ test('auto-switch waits for background running tabs and interactive banner suppo
     return null;
   };
   const select = walk(banner, n => n.dataset?.testid === 'agy-autoswitch-target-select');
+  const menu = walk(banner, n => n.dataset?.testid === 'agy-autoswitch-target-menu');
+  const optC = walk(banner, n => n.dataset?.testid === 'agy-autoswitch-target-option-acct-c');
   const pauseBtn = walk(banner, n => n.dataset?.testid === 'agy-autoswitch-pause');
   const nowBtn = walk(banner, n => n.dataset?.testid === 'agy-autoswitch-now');
-  assert.ok(select && pauseBtn && nowBtn);
+  assert.ok(select && menu && optC && pauseBtn && nowBtn);
+  assert.equal(select.tagName, 'BUTTON', 'auto-switch banner must use custom Antigravity dropdown rather than native <select>');
+  assert.equal(walk(banner, n => n.tagName === 'SELECT'), null);
 
-  // Swap target to candB and pause countdown
-  select.value = 'acct-c';
-  for (const fn of select.listeners.get('change') || []) fn();
+  // Open custom picker, select candB (acct-c), and pause countdown
+  for (const fn of select.listeners.get('click') || []) fn({ stopPropagation() {} });
+  for (const fn of optC.listeners.get('click') || []) fn({ stopPropagation() {} });
   for (const fn of pauseBtn.listeners.get('click') || []) fn();
   const countdownTick = intervals.find(i => i.ms === 1000 && !i.cleared);
   for (let i = 0; i < 10; i++) countdownTick.fn();
   assert.equal(switchedCalls.length, 0, 'paused countdown must not switch');
 
-  // Click Switch Now -> switches immediately to overridden target 'acct-c'
+  // Click Switch Now while another background tab starts running -> defers while preserving depletedGroupKey ('claude')
+  runningIds = ['bg-conv-2'];
   for (const fn of nowBtn.listeners.get('click') || []) fn();
+  await new Promise(r => setImmediate(r));
+  assert.equal(switchedCalls.length, 0);
+
+  // Once background tab finishes, deferred resume re-queries candidates with preserved group key and lets us switch
+  runningIds = [];
+  mainPoll.fn();
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  const banner2 = body.children.find(c => c.dataset?.testid === 'agy-autoswitch-banner' && c.isConnected);
+  assert.ok(banner2, 'deferred banner must reappear once background tasks finish');
+  const optC2 = walk(banner2, n => n.dataset?.testid === 'agy-autoswitch-target-option-acct-c');
+  const nowBtn2 = walk(banner2, n => n.dataset?.testid === 'agy-autoswitch-now');
+  for (const fn of optC2.listeners.get('click') || []) fn({ stopPropagation() {} });
+  for (const fn of nowBtn2.listeners.get('click') || []) fn();
   await new Promise(r => setImmediate(r));
   assert.equal(switchedCalls.length, 1);
   assert.equal(switchedCalls[0].accountId, 'acct-c');
 
+  ctx.__agyPowertools.dispose();
+});
+
+test('native-ui auto-switch resets switchingInProgress when relaunching is false without manualRestartRequired and preserves depletedGroupKey on deferral', async () => {
+  const source = readFileSync(new URL('../lib/native-ui.js', import.meta.url), 'utf8');
+  const intervals = [];
+  const candidateGroupKeys = [];
+  const switchedCalls = [];
+  let runningIds = [];
+  let switchReply = { ok: true, unchanged: true, relaunching: false, manualRestartRequired: false };
+  const makeEl = tag => ({
+    tagName: String(tag || 'div').toUpperCase(),
+    dataset: {},
+    style: {},
+    className: '',
+    textContent: '',
+    children: [],
+    listeners: new Map(),
+    isConnected: true,
+    append(...items) { this.children.push(...items); },
+    appendChild(item) { this.children.push(item); return item; },
+    remove() { this.isConnected = false; },
+    contains() { return false; },
+    setAttribute() {},
+    getAttribute() { return null; },
+    removeAttribute() {},
+    addEventListener(type, fn) { if (!this.listeners.has(type)) this.listeners.set(type, []); this.listeners.get(type).push(fn); },
+    removeEventListener() {},
+    querySelector: () => null,
+    querySelectorAll: () => []
+  });
+  const body = makeEl('body');
+  const candA = { id: 'acct-b', email: 'b@example.com', alias: '备用号B' };
+  let capturedEnv = null;
+  const ctx = vm.createContext({
+    document: {
+      readyState: 'complete',
+      head: makeEl('head'),
+      body,
+      documentElement: { toggleAttribute() {}, removeAttribute() {}, setAttribute() {}, style: { setProperty() {}, removeProperty() {} } },
+      createElement: tag => makeEl(tag),
+      addEventListener() {},
+      removeEventListener() {},
+      querySelector: () => null,
+      querySelectorAll: () => []
+    },
+    window: { addEventListener() {}, removeEventListener() {} },
+    location: { pathname: '/c/active-conv' },
+    AbortController,
+    React: { createElement: () => null, Fragment: 'fragment', useSyncExternalStore: (_, g) => g() },
+    ReactDOM: { createRoot: () => ({ render() {}, unmount() {} }) },
+    HC: () => null,
+    __agyPanels: env => { capturedEnv = env; return { dispose() {} }; },
+    __agyInitialSettings: { enabled: true, multiAccount: true, autoSwitchAccount: true },
+    __agyNativeAdapter: {
+      wrap: el => el,
+      installPage: () => true,
+      executionState: () => ({ conversationId: 'active-conv', status: 1 }),
+      runningConversationIds: () => runningIds,
+      capabilities: () => ({ email: 'a@example.com', model: 'Claude Opus 5.5', models: [{ modelId: 'Claude Opus 5.5' }] }),
+      service: () => ({
+        retrieveUserQuotaSummary: async () => ({
+          response: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 0, resetTimeMs: Date.now() + 3600_000 }] }] }
+        })
+      }),
+      setEnabled() {}, setStageUpdates() {}, setEfficientIO() {}, setContextLimit() {}, setSidebarProjectLimit() {},
+      dispose() {}
+    },
+    __agyPowertoolsHost: raw => {
+      const msg = JSON.parse(raw);
+      if (msg.method === 'settings.get') ctx.__agyPowertoolsReceive(msg.id, { enabled: true, multiAccount: true, autoSwitchAccount: true });
+      else if (msg.method === 'accounts.list' || msg.method === 'accounts.syncActive') {
+        ctx.__agyPowertoolsReceive(msg.id, { activeId: 'acct-a', accounts: [{ id: 'acct-a', email: 'a@example.com' }, candA] });
+      } else if (msg.method === 'accounts.autoSwitchCandidate') {
+        candidateGroupKeys.push(msg.depletedGroupKey);
+        ctx.__agyPowertoolsReceive(msg.id, { candidate: candA, candidates: [candA], cooldownRemainingMs: 0 });
+      } else if (msg.method === 'accounts.switch') {
+        switchedCalls.push(msg);
+        ctx.__agyPowertoolsReceive(msg.id, switchReply);
+      } else if (msg.method === 'accounts.refreshLocalQuotas') {
+        ctx.__agyPowertoolsReceive(msg.id, { ok: true, activeId: 'acct-a', accounts: [{ id: 'acct-a', email: 'a@example.com' }, candA] });
+      } else {
+        ctx.__agyPowertoolsReceive(msg.id, {});
+      }
+    },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setInterval: (fn, ms) => { const item = { fn, ms, cleared: false }; intervals.push(item); return intervals.length; },
+    clearInterval: id => { if (intervals[id - 1]) intervals[id - 1].cleared = true; },
+    setTimeout: () => 1,
+    clearTimeout: () => {}
+  });
+  vm.runInContext(source, ctx);
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  assert.ok(capturedEnv);
+
+  const walk = (node, pred) => {
+    if (!node) return null;
+    if (pred(node)) return node;
+    for (const c of node.children || []) { const hit = walk(c, pred); if (hit) return hit; }
+    return null;
+  };
+  const banner1 = body.children.find(c => c.dataset?.testid === 'agy-autoswitch-banner' && c.isConnected);
+  assert.ok(banner1);
+  assert.equal(candidateGroupKeys.at(-1), 'claude');
+
+  // 1. Trigger Switch Now while runningIds becomes non-empty -> defers preserving 'claude'
+  runningIds = ['bg-1'];
+  const now1 = walk(banner1, n => n.dataset?.testid === 'agy-autoswitch-now');
+  for (const fn of now1.listeners.get('click') || []) fn();
+  await new Promise(r => setImmediate(r));
+  assert.equal(switchedCalls.length, 0);
+
+  // 2. Resume after background task ends -> must pass 'claude' (NOT '') to accounts.autoSwitchCandidate!
+  runningIds = [];
+  const mainPoll = intervals.find(i => i.ms === 2000 && !i.cleared);
+  mainPoll.fn();
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  assert.equal(candidateGroupKeys.at(-1), 'claude', 'deferred auto-switch must preserve depletedGroupKey');
+
+  // 3. Switch returns unchanged / relaunching: false without manualRestartRequired -> MUST NOT wedge switchingInProgress!
+  const banner2 = body.children.find(c => c.dataset?.testid === 'agy-autoswitch-banner' && c.isConnected);
+  assert.ok(banner2);
+  const now2 = walk(banner2, n => n.dataset?.testid === 'agy-autoswitch-now');
+  for (const fn of now2.listeners.get('click') || []) fn();
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  assert.equal(switchedCalls.length, 1);
+
+  // Prove switchingInProgress was cleanly reset: refreshAccountQuotas succeeds instead of skipping!
+  const postRefresh = await capturedEnv.refreshAccountQuotas();
+  assert.equal(postRefresh.ok, true);
+  assert.notEqual(postRefresh.skipped, true);
   ctx.__agyPowertools.dispose();
 });

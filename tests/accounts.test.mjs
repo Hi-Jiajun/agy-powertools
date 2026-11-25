@@ -324,7 +324,10 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
       hooks.onRefreshQuotas?.(id);
       return hooks.refreshAccountQuotasImpl ? hooks.refreshAccountQuotasImpl(id) : Promise.resolve({ ok: true });
     },
-    refreshAccountCredentials: id => { hooks.onRefreshCredentials?.(id); return Promise.resolve({ ok: true }); }
+    refreshAccountCredentials: id => { hooks.onRefreshCredentials?.(id); return Promise.resolve({ ok: true }); },
+    switchAccount: id => (hooks.switchAccountImpl ? hooks.switchAccountImpl(id) : Promise.resolve({ ok: true })),
+    startAddAccount: alias => (hooks.startAddAccountImpl ? hooks.startAddAccountImpl(alias) : Promise.resolve({ ok: true })),
+    isTurnRunning: () => Boolean(hooks.isTurnRunning?.())
   });
   function renderChild(node) {
     const prevComp = activeComponent;
@@ -1676,4 +1679,47 @@ test('accountSupportsModel blocks incompatible Free/model accounts and rankAutoS
   // Ranking prefers pro-ticking (active weekly timer, 60% remaining) over pro-fresh (untouched 100%) and excludes freeAcct/noClaude
   const ranked = rankAutoSwitchCandidates([freeAcct, noClaude, proUntouched, proTicking], 'active', 'claude', now, 0.05, { activeModel: 'Claude Opus 5.5' });
   assert.deepEqual(ranked.map(r => r.acct.id), ['pro-ticking', 'pro-fresh']);
+});
+
+test('SwitchConfirmModal clarifies cross-tab running turns and AccountSwitcher surfaces manualRestartRequired notice without middle dots', async () => {
+  const accountsData = {
+    activeId: 'acct-a',
+    vaultSupported: true,
+    accounts: [
+      { id: 'acct-a', email: 'alpha@example.com', name: 'Alpha', hasCredential: true, disabled: false, groups: [] },
+      { id: 'acct-b', email: 'beta@example.com', name: 'Beta', hasCredential: true, disabled: false, groups: [] }
+    ]
+  };
+  const ui = createPanelHarness(accountsData, { enabled: true, multiAccount: true, language: 'zh-CN' }, {
+    isTurnRunning: () => true,
+    switchAccountImpl: async () => ({ ok: true, relaunching: false, manualRestartRequired: true })
+  });
+
+  // 1. Open AccountSwitcher popover & click non-active account -> SwitchConfirmModal warns accurately about active or background turns
+  let swTree = ui.renderSwitcher();
+  const trigger = ui.find(swTree, 'agy-account-switcher-trigger');
+  assert.ok(trigger);
+  trigger.props.onClick?.();
+  swTree = ui.renderSwitcher();
+  const rowB = ui.find(swTree, 'agy-account-row-acct-b');
+  assert.ok(rowB);
+  rowB.props.onClick();
+  swTree = ui.renderSwitcher();
+  const warn = ui.find(swTree, 'agy-switch-running-warning');
+  assert.ok(warn);
+  const warnText = ui.collectText(warn);
+  assert.ok(warnText.includes('当前或后台仍有会话正在执行'));
+  for (const forbidden of ['\u00b7', '\u2022', '\u2027', '\u30fb']) {
+    assert.equal(warnText.includes(forbidden), false);
+  }
+
+  // 2. Confirm switch returning manualRestartRequired -> AccountSwitcher displays visible notice inside popover
+  const confirmBtn = ui.find(swTree, 'agy-switch-confirm');
+  assert.ok(confirmBtn);
+  confirmBtn.props.onClick();
+  await new Promise(r => setImmediate(r));
+  swTree = ui.renderSwitcher();
+  const notice = ui.find(swTree, 'agy-popover-manual-restart');
+  assert.ok(notice);
+  assert.ok(ui.collectText(notice).includes('手动重启 Antigravity'));
 });
