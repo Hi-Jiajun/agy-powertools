@@ -1096,6 +1096,65 @@ test('userBubbleStrength updates CSS variables and readable foreground contrast,
   assert.equal(attrs.has('data-tooltip-id'), false);
   assert.equal(styleProps.has('--agy-bubble-bg'), false);
   assert.equal(styleProps.has('--agy-bubble-fg'), false);
+
+  // Also verify "N steps" split span formatting in worked-for-collapsible
+  const pSteps = page(true);
+  pSteps.document.documentElement.style = { setProperty() {}, removeProperty() {} };
+  pSteps.context.React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) };
+  pSteps.context.HU = m => m?.index;
+  pSteps.context.location.pathname = '/c/conv-steps';
+  pSteps.context.ReactDOM = { createRoot: () => ({ render() {}, unmount() {} }) };
+  const stepMain = { isConnected: true, textContent: 'Worked for 49s', contains: () => false };
+  const stepTail = { isConnected: true, textContent: '\u00b7 126 steps', contains: () => false };
+  const stepAttrs = new Map();
+  const stepBtn = {
+    isConnected: true,
+    get textContent() { return `${stepMain.textContent} ${stepTail.textContent}`; },
+    querySelectorAll: sel => (sel === 'span' ? [stepMain, stepTail] : []),
+    closest: sel => (sel === '[data-testid="agent-response"]' ? stepResp : null),
+    setAttribute: (k, v) => stepAttrs.set(k, String(v)),
+    getAttribute: k => (stepAttrs.has(k) ? stepAttrs.get(k) : null),
+    removeAttribute: k => stepAttrs.delete(k)
+  };
+  const stepResp = {
+    isConnected: true,
+    firstChild: null,
+    children: [],
+    querySelector: sel => (sel === '[data-testid="worked-for-collapsible"]' ? stepBtn : null),
+    querySelectorAll: () => [],
+    insertBefore(c) { c.isConnected = true; this.children.unshift(c); },
+    closest: () => null
+  };
+  pSteps.document.querySelectorAll = sel => (sel === '[data-testid="agent-response"]' ? [stepResp] : []);
+  pSteps.context.__agyNativeAdapter.wrap = el => el;
+  pSteps.context.__agyNativeAdapter.installPage = () => true;
+  pSteps.context.__agyNativeAdapter.onEditChange = () => () => {};
+  pSteps.context.__agyNativeAdapter.fiber = () => ({ memoizedProps: { container: { steps: [{ step: { case: 'userInput' }, metadata: { index: 0 } }] } }, return: null });
+  pSteps.context.__agyPowertoolsHost = raw => {
+    const req = JSON.parse(raw);
+    queueMicrotask(() => {
+      if (req.method === 'settings.get') {
+        pSteps.context.__agyPowertoolsReceive(req.id, { enabled: true, timing: true, language: 'zh-CN' });
+      } else if (req.method === 'state') {
+        pSteps.context.__agyPowertoolsReceive(req.id, {
+          conversationId: 'conv-steps',
+          turns: [{ turnNumber: 1, stepIndexStart: 0, stepIndexEnd: 5, status: 'complete', completedAtIso: '2026-11-24T00:00:00Z', durationMs: 49000, toolCalls: [] }],
+          requests: []
+        });
+      } else {
+        pSteps.context.__agyPowertoolsReceive(req.id, { ok: true });
+      }
+    });
+  };
+  pSteps.context.__agyInitialSettings = { enabled: true, timing: true, language: 'zh-CN' };
+  vm.runInContext(source, pSteps.context);
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(stepMain.textContent, '用时 49秒 126 步');
+  assert.equal(stepMain.textContent.includes('\u00b7'), false);
+  assert.equal(stepTail.textContent, '');
+  pSteps.context.__agyPowertools.dispose();
+  assert.equal(stepMain.textContent, 'Worked for 49s');
+  assert.equal(stepTail.textContent, '\u00b7 126 steps');
 });
 
 test('titlebarQuickPanel mounts left of titlebar-more-actions, falls back to overview/aux toggles, and unmounts when disabled', async () => {
@@ -3794,4 +3853,163 @@ test('composerRingSig gates contextWindow and speedStats fields on their respect
   assert.equal(renderCount, afterToggle);
 
   p.context.__agyPowertools.dispose();
+});
+
+test('overview native title tooltips promote into dark .pt-tip-pop popovers, statically localize known entries, and restore on dispose', async () => {
+  const nativeUiSrc = readFileSync(new URL('../lib/native-ui.js', import.meta.url), 'utf8');
+  const i18nSrc = readFileSync(new URL('../lib/native-i18n.js', import.meta.url), 'utf8');
+
+  const docListeners = new Map();
+  const matchesAtom = (el, atom) => {
+    if (!el || el.nodeType !== 1) return false;
+    const mEq = atom.match(/^\[([^=\]]+)="([^"]*)"\]$/);
+    if (mEq) return el.getAttribute(mEq[1]) === mEq[2];
+    const mAttr = atom.match(/^\[([^\]]+)\]$/);
+    if (mAttr) return el.hasAttribute(mAttr[1]);
+    return false;
+  };
+  const matchesDescendant = (el, sel) => {
+    for (const part of sel.split(',')) {
+      const tokens = part.trim().split(/\s+/).filter(Boolean);
+      if (!tokens.length) continue;
+      if (!matchesAtom(el, tokens[tokens.length - 1])) continue;
+      let ok = true;
+      let cur = el.parentElement;
+      for (let i = tokens.length - 2; i >= 0; i--) {
+        while (cur && !matchesAtom(cur, tokens[i])) cur = cur.parentElement;
+        if (!cur) { ok = false; break; }
+        cur = cur.parentElement;
+      }
+      if (ok) return el;
+    }
+    return null;
+  };
+  const makeEl = tag => ({
+    nodeType: 1,
+    tagName: String(tag || 'div').toUpperCase(),
+    attrs: {},
+    dataset: {},
+    style: {},
+    className: '',
+    children: [],
+    parentElement: null,
+    isConnected: true,
+    textContent: '',
+    getBoundingClientRect: () => ({ top: 200, bottom: 224, left: 600, right: 820, width: 220, height: 24 }),
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; },
+    hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
+    removeAttribute(k) { delete this.attrs[k]; },
+    append(...items) {
+      for (const it of items) {
+        if (it && typeof it === 'object') { it.parentElement = this; it.isConnected = true; this.children.push(it); }
+      }
+    },
+    appendChild(it) { this.append(it); return it; },
+    remove() { this.isConnected = false; this.parentElement = null; },
+    closest(sel) {
+      for (let cur = this; cur; cur = cur.parentElement) {
+        const hit = matchesDescendant(cur, sel);
+        if (hit) return hit;
+      }
+      return null;
+    },
+    querySelector: () => null,
+    querySelectorAll: () => []
+  });
+
+  const head = makeEl('head');
+  const body = makeEl('body');
+  const ovPanel = makeEl('div');
+  ovPanel.setAttribute('data-testid', 'overview-panel');
+  const staticRow = makeEl('div');
+  staticRow.setAttribute('title', 'Files Changed');
+  const zhRow = makeEl('div');
+  zhRow.setAttribute('title', '这是中文产物摘要');
+  ovPanel.append(staticRow, zhRow);
+  body.append(ovPanel);
+
+  const document = {
+    nodeType: 9,
+    head,
+    body,
+    documentElement: { toggleAttribute() {}, removeAttribute() {}, setAttribute() {}, style: { setProperty() {}, removeProperty() {} }, clientWidth: 1280, clientHeight: 800 },
+    readyState: 'complete',
+    createElement: tag => makeEl(tag),
+    createTreeWalker: () => ({ nextNode: () => null }),
+    addEventListener(type, fn) { if (!docListeners.has(type)) docListeners.set(type, []); docListeners.get(type).push(fn); },
+    removeEventListener() {},
+    querySelector: () => null,
+    querySelectorAll: () => []
+  };
+
+  const ctx = vm.createContext({
+    document,
+    window: { addEventListener() {}, removeEventListener() {} },
+    innerWidth: 1280,
+    innerHeight: 800,
+    location: { pathname: '/c/conv-tip' },
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    AbortController,
+    getComputedStyle: () => ({ display: 'block' }),
+    React: { createElement: () => null, Fragment: 'fragment', useSyncExternalStore: (_, g) => g() },
+    ReactDOM: { createRoot: () => ({ render() {}, unmount() {} }) },
+    HC: () => null,
+    __agyToZhTw: s => s,
+    __agyPanels: () => ({ dispose() {} }),
+    __agyInitialSettings: { enabled: true, language: 'zh-CN' },
+    __agyNativeAdapter: {
+      wrap: el => el,
+      installPage: () => true,
+      executionState: () => null,
+      runningConversationIds: () => [],
+      capabilities: () => ({}),
+      service: () => ({}),
+      setEnabled() {}, setStageUpdates() {}, setEfficientIO() {}, setContextLimit() {}, setSidebarProjectLimit() {},
+      dispose() {}
+    },
+    __agyPowertoolsHost: raw => {
+      const req = JSON.parse(raw);
+      queueMicrotask(() => {
+        if (req.method === 'settings.get') {
+          ctx.__agyPowertoolsReceive(req.id, { enabled: true, language: 'zh-CN' });
+        } else {
+          ctx.__agyPowertoolsReceive(req.id, {});
+        }
+      });
+    },
+    setInterval: () => 1,
+    clearInterval: () => {},
+    setTimeout,
+    clearTimeout,
+    queueMicrotask
+  });
+
+  vm.runInContext(i18nSrc, ctx);
+  vm.runInContext(nativeUiSrc, ctx);
+  await new Promise(r => setTimeout(r, 20));
+
+  const fire = (type, evt) => { for (const fn of docListeners.get(type) || []) fn(evt); };
+  fire('pointerover', { target: staticRow });
+  assert.equal(staticRow.hasAttribute('title'), false);
+  assert.equal(staticRow.getAttribute('data-agy-native-title'), 'Files Changed');
+  assert.equal(staticRow.getAttribute('data-pt-tip-place'), 'left');
+  fire('focusin', { target: staticRow });
+
+  const pop = body.children.find(c => c.id === 'agy-pt-tip-pop');
+  assert.ok(pop);
+  assert.equal(pop.dataset.open, 'true');
+  assert.equal(pop.children[0].textContent, '已更改文件');
+
+  fire('focusin', { target: zhRow });
+  assert.equal(zhRow.hasAttribute('title'), false);
+  assert.equal(pop.dataset.open, 'true');
+  assert.equal(pop.children[0].textContent, '这是中文产物摘要');
+
+  ctx.__agyPowertools.dispose();
+  assert.equal(staticRow.getAttribute('title'), 'Files Changed');
+  assert.equal(zhRow.getAttribute('title'), '这是中文产物摘要');
+  assert.equal(staticRow.hasAttribute('data-pt-tip'), false);
+  assert.equal(pop.isConnected, false);
 });

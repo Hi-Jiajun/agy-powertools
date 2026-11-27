@@ -526,3 +526,431 @@ test('disabled integration serves the selected pack and scoped overrides through
     }
   } finally {await stop?.();globalThis.fetch=fetchBefore;rmSync(dataDir,{recursive:true,force:true});}
 });
+
+test('localizer includes conversation step detail labels and excludes translation overlay roots', () => {
+  const makeNode = (value, matchedSelectors = []) => ({
+    nodeValue: value,
+    parentElement: {
+      closest: sel => matchedSelectors.some(m => sel.includes(m)) ? {} : null
+    }
+  });
+  const nodes = [
+    makeNode('Explored files', []),
+    makeNode('Explored, ran command', []),
+    makeNode('Analyzed', []),
+    makeNode('Waiting for subagent', []),
+    makeNode('Hook Json PreInvocation', []),
+    makeNode('Thought for 2m 15s', []),
+    makeNode('Analyzed 3 files', []),
+    makeNode('Settings', ['[data-agy-translate-root]'])
+  ];
+  const document = {
+    nodeType: 9,
+    body: { nodeType: 1, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] },
+    createTreeWalker: () => {
+      let i = 0;
+      return { nextNode: () => nodes[i++] || null };
+    },
+    querySelectorAll: () => []
+  };
+  const context = vm.createContext({
+    document,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), context);
+  const loc = context.__agyI18n.localizer();
+  loc.apply('zh-CN', true);
+  assert.equal(nodes[0].nodeValue, '探索文件');
+  assert.equal(nodes[1].nodeValue, '探索并运行命令');
+  assert.equal(nodes[2].nodeValue, '已分析');
+  assert.equal(nodes[3].nodeValue, '等待子智能体');
+  assert.equal(nodes[4].nodeValue, '前置调用钩子');
+  assert.equal(nodes[5].nodeValue, '思考了 2 分 15 秒');
+  assert.equal(nodes[6].nodeValue, '已分析 3 个文件');
+  assert.equal(nodes[7].nodeValue, 'Settings');
+  assert.equal(context.__agyI18n.t('Waiting for 6m timer, 1 subagent running', 'zh-CN'), '等待 6 分钟计时器，1 个子智能体运行中');
+  assert.equal(context.__agyI18n.t('Waiting for 6m timer, 1 subagent running', 'zh-TW'), '等待 6 分鐘計時器，1 個子智能體執行中');
+  assert.equal(context.__agyI18n.t('2 subagents and 3 background tasks', 'zh-CN'), '2 个子智能体，3 个后台任务');
+  assert.equal(context.__agyI18n.t('Waiting for your approval', 'zh-CN'), '等待你的批准');
+  assert.equal(context.__agyI18n.t('Waiting for user input', 'zh-CN'), '等待用户输入');
+  assert.equal(context.__agyI18n.t('Waiting for 2 timers', 'zh-CN'), '等待 2 个计时器');
+  assert.equal(context.__agyI18n.t('Asking', 'zh-CN'), '正在提问');
+  assert.equal(context.__agyI18n.t('1 question', 'zh-CN'), '1 个问题');
+  assert.equal(context.__agyI18n.t('Analyzing', 'zh-CN'), '正在分析');
+  assert.equal(context.__agyI18n.t('Explored files, ran commands, edited files', 'zh-CN'), '探索文件、运行命令、编辑文件');
+  assert.equal(context.__agyI18n.t('Explored 2 artifacts, edited 1 file', 'zh-CN'), '探索了 2 个产物、编辑 1 个文件');
+  assert.equal(context.__agyI18n.t('Message from CB1 Research Auditor (research)', 'zh-CN'), '来自 CB1 Research Auditor (research) 的消息');
+  assert.equal(context.__agyI18n.t('14m ago', 'zh-CN'), '14m ago');
+  assert.equal(context.__agyI18n.t('Show 9 more', 'zh-CN'), '显示其余 9 项');
+  assert.equal(context.__agyI18n.t('Message subagent, @ to mention, / for actions', 'zh-CN'), '向子智能体发消息，@ 引用，/ 选择操作');
+  assert.equal(context.__agyI18n.t('Other (write your answer)', 'zh-CN'), '其他（输入你的回答）');
+  assert.equal(context.__agyI18n.t('Skip', 'zh-CN'), '跳过');
+  assert.equal(context.__agyI18n.t('Hook Json PreToolUse', 'zh-CN'), '工具前置钩子');
+  assert.equal(context.__agyI18n.t('126 steps', 'zh-CN'), '126 步');
+  assert.equal(context.__agyI18n.t('1 step', 'zh-CN'), '1 步');
+  assert.equal(context.__agyI18n.t('Worked for 49s \u00b7 126 steps', 'zh-CN'), '用时 49秒 126 步');
+  assert.equal(context.__agyI18n.t('3/5 steps', 'zh-CN'), '3/5 步');
+  assert.equal(context.__agyI18n.t('Full View', 'zh-CN'), '完整视图');
+  assert.equal(context.__agyI18n.t('This subagent was killed and can no longer be messaged.', 'zh-CN'), '此子智能体已终止，无法继续发送消息。');
+  assert.equal(context.__agyI18n.t('Side Question:', 'zh-CN'), '侧边对话：');
+  assert.equal(context.__agyI18n.t('Side Question: Checking Current Progress Status', 'zh-CN'), '侧边对话：Checking Current Progress Status');
+  assert.equal(context.__agyI18n.t('just now', 'zh-CN'), '刚刚');
+  assert.equal(context.__agyI18n.t('Show 3 earlier steps', 'zh-CN'), '显示更早的 3 步');
+  loc.dispose();
+
+  // Split <span>1</span><span>question</span> handling without breaking standalone 'question'
+  const splitNumSpan = { textContent: '1' };
+  const splitQNode = { nodeValue: 'question', parentElement: { previousSibling: splitNumSpan, closest: () => null } };
+  const plainQNode = { nodeValue: 'question', parentElement: { previousSibling: null, closest: () => null } };
+  const splitNodes = [splitQNode, plainQNode];
+  const docSplit = {
+    nodeType: 9,
+    body: { nodeType: 1, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] },
+    createTreeWalker: () => { let k = 0; return { nextNode: () => splitNodes[k++] || null }; },
+    querySelectorAll: () => []
+  };
+  const splitCtx = vm.createContext({
+    document: docSplit,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), splitCtx);
+  const splitLoc = splitCtx.__agyI18n.localizer();
+  splitLoc.apply('zh-CN', true);
+  assert.equal(splitQNode.nodeValue, '个问题');
+  assert.equal(plainQNode.nodeValue, 'question');
+  splitLoc.dispose();
+});
+
+test('77s recording UI gaps translate cleanly while preserving 14m ago boundary and terminal emulator exclusions', () => {
+  const mkEl = (attrs = {}, cls = '') => ({
+    nodeType: 1,
+    attrs,
+    className: cls,
+    children: [],
+    parentElement: null,
+    previousSibling: null,
+    previousElementSibling: null,
+    isConnected: true,
+    hasAttribute: k => Object.prototype.hasOwnProperty.call(attrs, k),
+    getAttribute: k => (Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null),
+    closest(sel) {
+      for (const rawPart of sel.split(',')) {
+        const part = rawPart.trim();
+        if (!part) continue;
+        let cur = this;
+        while (cur) {
+          let ok = true;
+          if (part.includes('.xterm')) ok = cur.className.split(/\s+/).includes('xterm');
+          else if (part.startsWith('[data-testid*="terminal"]')) {
+            const tid = cur.getAttribute('data-testid') || '';
+            ok = tid.includes('terminal');
+            if (ok && part.includes(':not(')) {
+              for (const nm of part.matchAll(/:not\(\[data-testid="([^"]+)"\]\)/g)) {
+                if (tid === nm[1]) { ok = false; break; }
+              }
+            }
+          } else {
+            ok = false;
+          }
+          if (ok) return cur;
+          cur = cur.parentElement;
+        }
+      }
+      return null;
+    }
+  });
+
+  const termRow = mkEl({ 'data-testid': 'overview-panel-row-terminal' });
+  const termRowText = { nodeValue: 'Terminal', isConnected: true, parentElement: termRow };
+
+  const xtermBox = mkEl({}, 'xterm');
+  const xtermText = { nodeValue: 'Terminal', isConnected: true, parentElement: xtermBox };
+
+  const termOutBox = mkEl({ 'data-testid': 'terminal-output' });
+  const termOutText = { nodeValue: 'Terminal', isConnected: true, parentElement: termOutBox };
+
+  const countSpan = mkEl({});
+  countSpan.textContent = '12';
+  const spaceNode = { nodeValue: ' ', textContent: ' ' };
+  const resultSpan = mkEl({});
+  resultSpan.previousSibling = spaceNode;
+  resultSpan.previousElementSibling = countSpan;
+  const resultText = { nodeValue: 'results', isConnected: true, parentElement: resultSpan };
+
+  const bareResultSpan = mkEl({});
+  const bareResultText = { nodeValue: 'results', isConnected: true, parentElement: bareResultSpan };
+
+  const walkedNodes = [termRowText, xtermText, termOutText, resultText, bareResultText];
+  const document = {
+    nodeType: 9,
+    body: { nodeType: 1, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] },
+    createTreeWalker: () => {
+      let i = 0;
+      return { nextNode: () => walkedNodes[i++] || null };
+    },
+    querySelectorAll: () => []
+  };
+  const ctx = vm.createContext({
+    document,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), ctx);
+  const { t, localizer } = ctx.__agyI18n;
+  const loc = localizer();
+  loc.apply('zh-CN', true);
+
+  assert.equal(t('Thinking…', 'zh-CN'), '正在思考…');
+  assert.equal(t('Thinking for 9s', 'zh-CN'), '正在思考 9 秒');
+  assert.equal(t('Thinking for 1m 25s', 'zh-TW'), '正在思考 1 分 25 秒');
+  assert.equal(t('Terminals', 'zh-CN'), '终端');
+  assert.equal(t('Proceeded with', 'zh-CN'), '已继续执行');
+  assert.equal(t('Auto-proceeded with', 'zh-CN'), '已自动继续');
+  assert.equal(t('Proceeded with npm test', 'zh-CN'), '已继续执行 npm test');
+  assert.equal(t('Loading Antigravity...', 'zh-CN'), '正在加载 Antigravity…');
+  assert.equal(t('Loading Antigravity…', 'zh-TW'), '正在載入 Antigravity…');
+  assert.equal(t('Delete Side Question', 'zh-TW'), '刪除側邊對話');
+  assert.equal(t('Open search in external browser', 'zh-TW'), '在外部瀏覽器中開啟搜尋');
+  assert.equal(t('Updated Nov 26, 2026', 'zh-CN'), '更新于 Nov 26, 2026');
+  assert.equal(t('5 results', 'zh-CN'), '5 条结果');
+  assert.equal(t('1 result', 'zh-TW'), '1 條結果');
+  assert.equal(t('14m ago', 'zh-CN'), '14m ago');
+  assert.equal(t('14m ago', 'zh-TW'), '14m ago');
+
+  assert.equal(termRowText.nodeValue, '终端');
+  assert.equal(xtermText.nodeValue, 'Terminal');
+  assert.equal(termOutText.nodeValue, 'Terminal');
+  assert.equal(resultText.nodeValue, '条结果');
+  assert.equal(bareResultText.nodeValue, 'results');
+  loc.dispose();
+});
+
+test('slash command descriptions, model deprecation badges, consistent English thinking efforts, and sentence-case settings work cleanly', () => {
+  const mkEl = (attrs = {}) => ({
+    nodeType: 1,
+    attrs,
+    children: [],
+    parentElement: null,
+    isConnected: true,
+    hasAttribute: k => Object.prototype.hasOwnProperty.call(attrs, k),
+    getAttribute: k => (Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null),
+    closest(sel) {
+      for (const rawPart of sel.split(',')) {
+        const part = rawPart.trim();
+        if (!part) continue;
+        const m = part.match(/^\[([^=\]]+)="([^"]*)"\]$/);
+        for (let cur = this; cur; cur = cur.parentElement) {
+          if (m && cur.getAttribute(m[1]) === m[2]) return cur;
+        }
+      }
+      return null;
+    }
+  });
+  const mkText = (val, parent) => ({ nodeValue: val, isConnected: true, parentElement: parent });
+
+  const effortOpt = tid => mkEl({ 'data-testid': tid });
+  const optLow = effortOpt('model-selector-effort-option');
+  const optMed = effortOpt('model-selector-effort-option');
+  const optHigh = effortOpt('model-selector-effort-option');
+  const optXHigh = effortOpt('model-selector-effort-option');
+  const nonEffort = effortOpt('model-selector-item');
+
+  const nLow = mkText('Low', optLow);
+  const nMed = mkText('Medium', optMed);
+  const nHigh = mkText('High', optHigh);
+  const nXHigh = mkText('Extra High', optXHigh);
+  const nModelBadge = mkText('Medium', nonEffort);
+
+  const walkedNodes = [nLow, nMed, nHigh, nXHigh, nModelBadge];
+  const document = {
+    nodeType: 9,
+    body: { nodeType: 1, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] },
+    createTreeWalker: () => {
+      let i = 0;
+      return { nextNode: () => walkedNodes[i++] || null };
+    },
+    querySelectorAll: () => []
+  };
+  const ctx = vm.createContext({
+    document,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), ctx);
+  const { t, localizer } = ctx.__agyI18n;
+  const loc = localizer();
+  loc.apply('zh-CN', true);
+
+  // Thinking effort options remain consistently in English everywhere across menus & badges
+  assert.equal(nLow.nodeValue, 'Low');
+  assert.equal(nMed.nodeValue, 'Medium');
+  assert.equal(nHigh.nodeValue, 'High');
+  assert.equal(nXHigh.nodeValue, 'Extra High');
+  assert.equal(nModelBadge.nodeValue, 'Medium');
+
+  // Slash command descriptions (command tokens stay English)
+  assert.equal(t('Ask a quick question without interrupting the main conversation.', 'zh-CN'), '发起侧边对话，不打断主对话。');
+  assert.equal(t('Run until the specified goal is completely finished.', 'zh-CN'), '持续执行，直到指定目标完全达成。');
+  assert.equal(t('Compact the conversation now (summarize history to free up the context window).', 'zh-TW'), '立即壓縮目前會話（總結歷史內容以釋放上下文視窗）。');
+  assert.equal(t('Run an instruction on a recurring schedule or as a one-time timer.', 'zh-CN'), '按周期计划或一次性定时执行指令。');
+  assert.equal(t('Invoke a browser agent for web tasks.', 'zh-CN'), '调用浏览器智能体处理网页任务。');
+  assert.equal(t('Plan carefully before executing a task.', 'zh-CN'), '执行任务前先制定详细计划。');
+  assert.equal(t('Interview me to align on a plan.', 'zh-TW'), '通過交互式問答對齊方案細節。');
+  assert.equal(t('Invoke a team of agents to autonomously tackle large projects.', 'zh-CN'), '调用多智能体协作团队自主完成大型项目。');
+  assert.equal(t('btw', 'zh-CN'), 'btw');
+  assert.equal(t('goal', 'zh-CN'), 'goal');
+
+  // Model deprecation badges & compound tooltips
+  assert.equal(t('Leaving Soon', 'zh-CN'), '即将下线');
+  assert.equal(
+    t('The original Gemini 4 model for advanced workflows. Leaving on Nov 30.', 'zh-CN'),
+    '适用于高阶工作流的经典 Gemini 4 模型。将于 Nov 30 下线。'
+  );
+  assert.equal(t('Leaving on Nov 30.', 'zh-CN'), '将于 Nov 30 下线。');
+
+  // Remote Control QR, built-in theme presets, shortcuts placeholder & sentence-case settings
+  assert.equal(t('Scan the code to open this device in Remote Control, or', 'zh-TW'), '掃碼在遠端控制中開啟此裝置，或');
+  assert.equal(t('copy link', 'zh-CN'), '复制链接');
+  assert.equal(t('Legacy Dark', 'zh-TW'), '經典深色');
+  assert.equal(t('Legacy Light', 'zh-CN'), '经典浅色');
+  assert.equal(t('Search shortcuts...', 'zh-CN'), '搜索快捷键...');
+  assert.equal(t('Notification settings', 'zh-CN'), '通知设置');
+  assert.equal(t('Enable telemetry', 'zh-CN'), '启用遥测');
+  assert.equal(t('Marketing emails', 'zh-CN'), '营销邮件');
+  assert.equal(t('Your plan: Google AI Ultra', 'zh-CN'), '当前套餐：Google AI Ultra');
+  assert.equal(t('Your plan:', 'zh-CN'), '当前套餐：');
+  assert.equal(t('Download location', 'zh-CN'), '下载位置');
+  assert.equal(t('Browsing history', 'zh-CN'), '浏览历史');
+  assert.equal(t('Browser actuation rules', 'zh-CN'), '浏览器操作规则');
+  assert.equal(t('Enable AI credit overages', 'zh-CN'), '允许超额使用 AI 积分');
+
+  // Intentional upstream & third-party preserves
+  assert.equal(t('Dracula', 'zh-CN'), 'Dracula');
+  assert.equal(t('Turbo', 'zh-CN'), 'Turbo');
+  assert.equal(t('14m ago', 'zh-CN'), '14m ago');
+  assert.equal(t('3h ago', 'zh-CN'), '3h ago');
+  loc.dispose();
+});
+
+test('P0/P1/P2 localization batch translates placeholders, actions, hooks, logs, and errors while preserving canonical zh->en lookups', () => {
+  const ctx = vm.createContext({
+    document: { nodeType: 9, createTreeWalker: () => ({ nextNode: () => null }), querySelectorAll: () => [] },
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), ctx);
+  const t = ctx.__agyI18n.t;
+
+  // P0 placeholders & actions
+  assert.equal(t('Search projects...', 'zh-CN'), '搜索项目…');
+  assert.equal(t('Search for conversations...', 'zh-TW'), '搜尋會話…');
+  assert.equal(t('Write a comment...', 'zh-CN'), '输入评论…');
+  assert.equal(t('Files Changed', 'zh-CN'), '已更改文件');
+  assert.equal(t('Stop All Subagents', 'zh-CN'), '停止全部子智能体');
+  assert.equal(t('No active terminals', 'zh-TW'), '暫無活躍終端');
+  assert.equal(t('Proceed with Plan', 'zh-CN'), '按计划执行');
+  assert.equal(t('Reset All to Defaults', 'zh-CN'), '全部恢复默认');
+  assert.equal(t('Ready', 'zh-TW'), '就緒');
+
+  // P1 customizations, hooks, review, automations & remote control
+  assert.equal(t('UI Plugins', 'zh-CN'), '界面插件');
+  assert.equal(t("These come with the plugin and can't be revoked.", 'zh-TW'), '這些權限隨外掛附帶，無法撤銷。');
+  assert.equal(t('Agent Hooks Configuration', 'zh-CN'), '智能体钩子配置');
+  assert.equal(t('Artifact updated by agent', 'zh-CN'), '产物已由智能体更新');
+  assert.equal(t('Show Remote Control QR code', 'zh-TW'), '顯示遠端控制二維碼');
+  assert.equal(t('Purchase Credits', 'zh-TW'), '購買積分');
+  assert.equal(t('No keyboard shortcuts found matching your filter.', 'zh-CN'), '未找到匹配的快捷键。');
+
+  // P2 failure toasts & environment warnings
+  assert.equal(t('Failed to delete conversation', 'zh-CN'), '删除会话失败');
+  assert.equal(t('Running processes are killed. This cannot be undone.', 'zh-TW'), '執行中的進程將被終止，此操作無法撤銷。');
+  assert.equal(t("Couldn't clear browsing data. Try again.", 'zh-CN'), '无法清除浏览数据，请重试。');
+
+  // First-entry-wins reverse zh -> en mappings must remain canonical
+  assert.equal(t('重试', 'en'), 'Retry');
+  assert.equal(t('有帮助', 'en'), 'Good response');
+  assert.equal(t('当前会话', 'en'), 'Current conversation');
+
+  // Preserved tokens
+  assert.equal(t('Turbo', 'zh-CN'), 'Turbo');
+  assert.equal(t('14m ago', 'zh-CN'), '14m ago');
+  assert.equal(t('Dracula', 'zh-CN'), 'Dracula');
+
+  // Width controls, tool/project settings & feedback form placeholders
+  assert.equal(t('Narrow', 'zh-CN'), '窄');
+  assert.equal(t('Wide', 'zh-TW'), '寬');
+  assert.equal(t('Fill', 'zh-CN'), '铺满');
+  assert.equal(t('Fill', 'zh-TW'), '鋪滿');
+  assert.equal(t('Modify permissions for file, terminal, and MCP tools.', 'zh-CN'), '修改文件、终端和 MCP 工具的权限。');
+  assert.equal(t('Modify permissions for file and terminal tools.', 'zh-TW'), '修改檔案和終端工具的權限。');
+  assert.equal(t('Manage project folders and settings.', 'zh-CN'), '管理项目文件夹与设置。');
+  assert.equal(t('Folders', 'zh-CN'), '文件夹');
+  assert.equal(t('Add Folder', 'zh-CN'), '添加文件夹');
+  assert.equal(t('Describe the bug you encountered...', 'zh-CN'), '描述你遇到的问题…');
+  assert.equal(t('Please list the steps to reproduce the issue', 'zh-TW'), '請列出重現此問題的步驟');
+  assert.equal(t('Enter your feedback here...', 'zh-CN'), '在此输入你的反馈…');
+});
+
+test('composer voice/send/audio tooltips and adjacent toolbar strings translate cleanly', () => {
+  const ctx = vm.createContext({
+    document: { nodeType: 9, createTreeWalker: () => ({ nextNode: () => null }), querySelectorAll: () => [] },
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), ctx);
+  const t = ctx.__agyI18n.t;
+
+  assert.equal(t('Start Voice mode', 'zh-CN'), '开启语音模式');
+  assert.equal(t('End Voice mode', 'zh-CN'), '结束语音模式');
+  assert.equal(t('Send Message', 'zh-CN'), '发送消息');
+  assert.equal(t('Send Message Enter', 'zh-CN'), '发送消息 Enter');
+  assert.equal(t('Send Message Ctrl+Enter', 'zh-CN'), '发送消息 Ctrl+Enter');
+  assert.equal(t('Queue Message Alt+Enter', 'zh-TW'), '排隊傳送 Alt+Enter');
+  assert.equal(t('Record Audio', 'zh-CN'), '录制语音');
+  assert.equal(t('Record Audio', 'zh-TW'), '錄製語音');
+  assert.equal(t('Stop Recording', 'zh-CN'), '停止录制');
+  assert.equal(t('Stop Recording and Send', 'zh-CN'), '停止录制并发送');
+  assert.equal(t('Add context', 'zh-CN'), '添加上下文');
+  assert.equal(t('Toggle Terminal Panel', 'zh-CN'), '切换终端面板');
+  assert.equal(t('Close Panel', 'zh-CN'), '关闭面板');
+  assert.equal(t('发送消息', 'en'), 'Send message');
+});
+
+test('built-in skills and branch-session descriptions translate cleanly and PR #82 labels remain untouched', () => {
+  const ctx = vm.createContext({
+    document: { nodeType: 9, createTreeWalker: () => ({ nextNode: () => null }), querySelectorAll: () => [] },
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    __agyToZhTw: toZhTw
+  });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), ctx);
+  const t = ctx.__agyI18n.t;
+  assert.equal(t("Comprehensive guide and reference for the Antigravity Customization System. Use to explain how customizations work, their loading priority, discovery mechanisms, and to guide the creation of skills, rules, plugins, hooks, and MCP servers.", 'zh-CN'), 'Antigravity 自定义系统的完整指南与参考手册。用于说明自定义项的工作原理、加载优先级与发现机制，并指导创建技能、规则、插件、钩子和 MCP 服务器。');
+  assert.equal(t("Interactive guide to design and create a scheduled background automation. Use this skill when the user wants to create an automated or recurring scheduled task (e.g. \"summarize my emails every morning\", \"every Monday send me a to-do list\"). Also triggered by the /automation slash command.", 'zh-TW'), toZhTw('用于设计与创建后台定时自动化的交互式指南。当用户希望创建自动或周期性定时任务（如每天早上汇总邮件、每周一发送待办清单）时使用，也可通过 /automation 斜杠命令触发。'));
+  assert.equal(t("Create a new conversation from the complete local transcript through a selected turn.", 'zh-CN'), '基于截至指定轮次的完整本地会话记录创建新会话分支。');
+  assert.equal(t("Create a new conversation from the complete local transcript through a selected turn.", 'zh-TW'), '基於截至指定輪次的完整本機會話記錄建立新會話分支。');
+  assert.equal(t("ONLY for the native-swarm worker whose brief says it is the monitor. On a timer, it checks whether the whole swarm has stalled and calls on the one member who can unstick it. Coordinators and other workers: do not load this.", 'zh-CN'), '仅限任务简报指定为监控员的原生蜂群成员使用。按定时器检查蜂群是否卡滞并唤醒可解堵的成员。协调者与其他成员请勿加载。');
+  // Split numeric siblings only emit Chinese strings for zh-CN / zh-TW (never fr)
+  const splitNum = { textContent: '3' };
+  const frResNode = { nodeValue: 'results', isConnected: true, parentElement: { previousSibling: splitNum, closest: () => null } };
+  const frDoc = {
+    nodeType: 9,
+    body: { nodeType: 1, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] },
+    createTreeWalker: () => { let done = false; return { nextNode: () => (done ? null : (done = true, frResNode)) }; },
+    querySelectorAll: () => []
+  };
+  const frCtx = vm.createContext({ document: frDoc, NodeFilter: { SHOW_TEXT: 4 }, MutationObserver: class { observe() {} disconnect() {} }, __agyToZhTw: toZhTw });
+  vm.runInContext(readFileSync('lib/native-i18n.js', 'utf8'), frCtx);
+  assert.equal(frResNode.nodeValue, '条结果');
+  frCtx.__agyLocalization.apply('fr', false);
+  assert.equal(frResNode.nodeValue, 'results');
+  frCtx.__agyLocalization.dispose();
+});
