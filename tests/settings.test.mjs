@@ -168,8 +168,35 @@ test('settings persist, merge safely, and reject unknown options without changin
     store.set({language:'en',contextLimit:1000000});assert.equal(store.get().contextLimit,1000000);assert.equal(store.get().language,'en');
     store.set({contextLimit:256000});assert.equal(store.get().contextLimit,256000);
     store.set({contextLimit:0});assert.equal(store.get().contextLimit,0);
+    assert.equal(DEFAULT_SETTINGS.detailTranslation, false);
+    assert.equal(DEFAULT_SETTINGS.detailTranslationMode, 'replace');
+    assert.equal(DEFAULT_SETTINGS.detailTranslationEngine, 'openai');
+    assert.equal(DEFAULT_SETTINGS.detailTranslationBaseUrl, '');
+    assert.equal(DEFAULT_SETTINGS.detailTranslationModel, '');
+    store.set({
+      detailTranslation: true,
+      detailTranslationMode: 'bilingual',
+      detailTranslationEngine: 'google',
+      detailTranslationBaseUrl: 'https://translation.googleapis.com/language/translate/v2///',
+      detailTranslationModel: ''
+    });
+    assert.equal(store.get().detailTranslation, true);
+    assert.equal(store.get().detailTranslationMode, 'bilingual');
+    assert.equal(store.get().detailTranslationEngine, 'google');
+    assert.equal(store.get().detailTranslationBaseUrl, 'https://translation.googleapis.com/language/translate/v2');
+    assert.equal(store.get().detailTranslationModel, '');
+    store.set({ detailTranslationEngine: 'azure', detailTranslationModel: ' eastasia ' });
+    assert.equal(store.get().detailTranslationEngine, 'azure');
+    assert.equal(store.get().detailTranslationModel, 'eastasia');
+    store.set({
+      detailTranslation: false,
+      detailTranslationMode: 'replace',
+      detailTranslationEngine: 'openai',
+      detailTranslationBaseUrl: '',
+      detailTranslationModel: ''
+    });
     const before = readFileSync(join(directory, 'settings.json'), 'utf8');
-    for (const value of [{ compact: 'false' }, { turnMeta: 'yes' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { sidebarFolderDrop: 'yes' }, { sidebarFolderDropPin: 'yes' }, { composerQuotaHaloWindow: '1d' }, { sidebarRunningBeam: 'yes' }, { sidebarRunningBeamPalette: 'quota' }, { sidebarRunningBeamStyle: 'pulse' }, { sidebarRunningBeamStyle: 'orbit' }, { sidebarRunningBeamStyle: 123 }, { sidebarHideNativeSpinner: 1 }, { sidebarRunningGroup: 'on' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {tokenUnit:'metric'}, {tokenUnit:1}, {currency:'EUR'}, {currency:'cny'}, {cnyRate:7.2}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
+    for (const value of [{ compact: 'false' }, { turnMeta: 'yes' }, { userBubbleTint: 'yes' }, { userBubblePreset: 'neon' }, { userBubbleColor: 'red' }, { userBubbleColor: '#123;color:red' }, { userBubbleStrength: 5 }, { userBubbleStrength: 105 }, { userBubbleStrength: 20.5 }, { sessionSearch: 'yes' }, { sidebarFolderDrop: 'yes' }, { sidebarFolderDropPin: 'yes' }, { composerQuotaHaloWindow: '1d' }, { sidebarRunningBeam: 'yes' }, { sidebarRunningBeamPalette: 'quota' }, { sidebarRunningBeamStyle: 'pulse' }, { sidebarRunningBeamStyle: 'orbit' }, { sidebarRunningBeamStyle: 123 }, { sidebarHideNativeSpinner: 1 }, { sidebarRunningGroup: 'on' }, { detailTranslation: 'yes' }, { detailTranslationMode: 'side' }, { detailTranslationEngine: 'free' }, { detailTranslationEngine: 'anthropic' }, { detailTranslationBaseUrl: 'ftp://bad.example.com' }, { detailTranslationBaseUrl: 'https://user:pass@bad.example.com' }, { detailTranslationBaseUrl: 'https://api.openai.com/v1?api_key=leak' }, { detailTranslationBaseUrl: 'https://api.openai.com/v1#frag' }, { detailTranslationModel: 'bad model' }, { unknown: true }, { toString: false }, {language:'invalid'}, {overviewRange:'custom'}, {overviewRange:'invalid'}, {pricingMode:'batch'}, {pricingMode:true}, {tokenUnit:'metric'}, {tokenUnit:1}, {currency:'EUR'}, {currency:'cny'}, {cnyRate:7.2}, {accountViewMode:'grid'}, {accountQuotaWindow:'1h'}, {proxyUrl:'ftp://127.0.0.1:21'}, {proxyUrl:'http://127.0.0.1:7897;calc'}, {proxyBypass:'localhost"bad'}, {contextLimit:999999}, []]) assert.throws(() => store.set(value), /设置/);
     assert.equal(readFileSync(join(directory, 'settings.json'), 'utf8'), before);
     store.set(DEFAULT_SETTINGS); assert.deepEqual(store.get(), DEFAULT_SETTINGS);
     store.set({ compact: false, language: DEFAULT_SETTINGS.language === 'en' ? 'zh-CN' : 'en' });
@@ -278,6 +305,46 @@ test('stripProxyUrlCredentials and exportSettingsPayload strip proxy auth and ex
   });
   assert.deepEqual(beamBadImport.patch, { sidebarRunningBeam: true });
   assert.deepEqual(beamBadImport.skippedKeys.sort(), ['cnyRate', 'currency', 'sidebarRunningBeamStyle', 'tokenUnit']);
+
+  // Round-trip detailTranslation settings cleanly through exportSettingsPayload & sanitizeImportedSettings
+  const trExport = exportSettingsPayload({
+    ...DEFAULT_SETTINGS,
+    language: 'ja',
+    detailTranslation: true,
+    detailTranslationMode: 'bilingual',
+    detailTranslationEngine: 'azure',
+    detailTranslationBaseUrl: 'https://api.cognitive.microsofttranslator.com///',
+    detailTranslationModel: ' eastasia '
+  });
+  assert.equal(trExport.settings.language, 'ja');
+  assert.equal(trExport.settings.detailTranslation, true);
+  assert.equal(trExport.settings.detailTranslationMode, 'bilingual');
+  assert.equal(trExport.settings.detailTranslationEngine, 'azure');
+  assert.equal(trExport.settings.detailTranslationBaseUrl, 'https://api.cognitive.microsofttranslator.com');
+  assert.equal(trExport.settings.detailTranslationModel, 'eastasia');
+  const trImported = sanitizeImportedSettings(trExport);
+  assert.equal(trImported.patch.detailTranslation, true);
+  assert.equal(trImported.patch.detailTranslationMode, 'bilingual');
+  assert.equal(trImported.patch.detailTranslationEngine, 'azure');
+  assert.equal(trImported.patch.detailTranslationBaseUrl, 'https://api.cognitive.microsofttranslator.com');
+  assert.equal(trImported.patch.detailTranslationModel, 'eastasia');
+
+  // Defensively strip query/auth secrets from detailTranslationBaseUrl on export, and reject them on import
+  const leakyExport = exportSettingsPayload({
+    ...DEFAULT_SETTINGS,
+    detailTranslationBaseUrl: 'https://user:pass@api.example.com/v1?api_key=leak#frag'
+  });
+  assert.equal(leakyExport.settings.detailTranslationBaseUrl, 'https://api.example.com/v1');
+  const rejectedImport = sanitizeImportedSettings({
+    format: SETTINGS_EXPORT_FORMAT,
+    schemaVersion: 1,
+    settings: {
+      compact: false,
+      detailTranslationBaseUrl: 'https://api.openai.com/v1?api_key=leak'
+    }
+  });
+  assert.equal(Object.hasOwn(rejectedImport.patch, 'detailTranslationBaseUrl'), false);
+  assert.ok(rejectedImport.skippedKeys.includes('detailTranslationBaseUrl'));
 });
 
 test('sanitizeImportedSettings validates envelope, strips proxy credentials, skips non-portable/unknown/invalid keys, and rejects bad payloads (Issue #88)', () => {

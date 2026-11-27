@@ -499,10 +499,146 @@ test('createProxyFetcher tunnels HTTPS requests through HTTP CONNECT and SOCKS5 
     assert.deepEqual(JSON.parse(await res3.text()), { tag_name: 'v2.16.9' });
     assert.equal(fallbackCalls, 0);
     assert.deepEqual(socksTargets, [`${targetHost}:443`]);
+
+    // 8. Bypass check honors NO_PROXY and localhost loopback
+    let directHits = 0;
+    const bypassFetcher = createProxyFetcher({
+      home: '/nonexistent-home-for-proxy-test',
+      env: { HTTPS_PROXY: `http://127.0.0.1:${httpProxy.port}`, NO_PROXY: '.bypass.test,10.0.0.0/8' },
+      fallback: async url => { directHits++; return { ok: true, status: 204, url, headers: new Headers(), text: async () => '' }; }
+    });
+    const bypassed = await bypassFetcher('https://api.bypass.test/v1/chat/completions', { method: 'POST', body: '{}' });
+    assert.equal(bypassed.status, 204);
+    assert.equal(directHits, 1);
   } finally {
     for (const timer of slowTimers) clearInterval(timer);
     await httpProxy.close();
     await socksProxy.close();
+    await httpsServer.close();
+  }
+});
+
+test('createProxyFetcher supports POST JSON body, json(), header helpers, and SSE streaming through proxy', async () => {
+  const targetHost = 'post-proxy.test';
+  const { key, cert } = createSelfSignedCert(targetHost);
+  const seenPosts = [];
+  const httpsServer = await listenHttps({ key, cert }, (req, res) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      seenPosts.push({
+        method: req.method,
+        url: req.url,
+        auth: req.headers.authorization || '',
+        googKey: req.headers['x-goog-api-key'] || '',
+        azureKey: req.headers['ocp-apim-subscription-key'] || '',
+        azureRegion: req.headers['ocp-apim-subscription-region'] || '',
+        xApiKey: req.headers['x-api-key'] || '',
+        apiKeyHeader: req.headers['api-key'] || '',
+        cookie: req.headers.cookie || '',
+        body: Buffer.concat(chunks).toString('utf8')
+      });
+      if (req.url === '/redirect-other') {
+        res.writeHead(307, { Location: `https://${targetHost}:8443/final` });
+        res.end();
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+        res.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': ['a=1', 'b=2'] });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+
+  const httpProxy = await listenTcp(clientSocket => {
+    let buf = Buffer.alloc(0);
+    const onData = chunk => {
+      buf = Buffer.concat([buf, chunk]);
+      const endIdx = buf.indexOf('\r\n\r\n');
+      if (endIdx === -1) return;
+      clientSocket.off('data', onData);
+      const leftover = buf.subarray(endIdx + 4);
+      const upstream = net.connect(httpsServer.port, '127.0.0.1', () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (leftover.length) upstream.write(leftover);
+        clientSocket.pipe(upstream);
+        upstream.pipe(clientSocket);
+      });
+      upstream.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => upstream.destroy());
+    };
+    clientSocket.on('data', onData);
+  });
+
+  try {
+    const fetcher = createProxyFetcher({
+      home: '/nonexistent-home-for-proxy-test',
+      env: { HTTPS_PROXY: `http://127.0.0.1:${httpProxy.port}` },
+      fallback: async () => { throw new Error('direct fallback disallowed'); },
+      tlsOptions: { ca: cert }
+    });
+
+    const sseRes = await fetcher(`https://${targetHost}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-proxy-test' },
+      body: JSON.stringify({ model: 'gpt-4o-mini', stream: true })
+    });
+    assert.equal(sseRes.ok, true);
+    assert.match(sseRes.headers.get('content-type') || '', /text\/event-stream/);
+    let sseText = '';
+    for await (const chunk of sseRes.body) sseText += Buffer.from(chunk).toString('utf8');
+    assert.match(sseText, /"content":"hello"/);
+    assert.equal(seenPosts[0].method, 'POST');
+    assert.equal(seenPosts[0].auth, 'Bearer sk-proxy-test');
+
+    const jsonRes = await fetcher(`https://${targetHost}/v1/echo`, { method: 'POST', body: '{"x":1}' });
+    assert.deepEqual(await jsonRes.json(), { ok: true });
+    assert.deepEqual(jsonRes.headers.getSetCookie(), ['a=1', 'b=2']);
+
+    // Cross-origin 307 redirect must strip all secret/API key headers (including Azure/Google/custom keys)
+    const redirectRes = await fetcher(`https://${targetHost}/redirect-other`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer sk-cross-secret',
+        'X-Goog-Api-Key': 'gk-cross-secret',
+        'Ocp-Apim-Subscription-Key': 'az-cross-secret',
+        'Ocp-Apim-Subscription-Region': 'eastasia',
+        'X-Api-Key': 'xk-cross-secret',
+        'Api-Key': 'ak-cross-secret',
+        Cookie: 'sid=secret'
+      },
+      body: '{"z":1}',
+      redirect: 'follow'
+    });
+    assert.equal(redirectRes.status, 200);
+    const redirectedFinal = seenPosts.find(p => p.url === '/final');
+    assert.ok(redirectedFinal);
+    assert.equal(redirectedFinal.method, 'POST');
+    assert.equal(redirectedFinal.auth, '');
+    assert.equal(redirectedFinal.googKey, '');
+    assert.equal(redirectedFinal.azureKey, '');
+    assert.equal(redirectedFinal.azureRegion, '');
+    assert.equal(redirectedFinal.xApiKey, '');
+    assert.equal(redirectedFinal.apiKeyHeader, '');
+    assert.equal(redirectedFinal.cookie, '');
+
+    // redirect: 'error' rejects cleanly with noFallback (never leaks to direct fallback)
+    await assert.rejects(
+      () => fetcher(`https://${targetHost}/redirect-other`, {
+        method: 'POST',
+        headers: { 'Ocp-Apim-Subscription-Key': 'az-cross-secret' },
+        body: '{"z":1}',
+        redirect: 'error'
+      }),
+      err => err.noFallback === true && /不允许重定向/.test(err.message)
+    );
+  } finally {
+    await httpProxy.close();
     await httpsServer.close();
   }
 });

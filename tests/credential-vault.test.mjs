@@ -12,6 +12,7 @@ import {
   extractCredentialEmail,
   extractCredentialMeta,
   extractCredentialRefreshHash,
+  secretTargetFor,
   vaultTargetFor
 } from '../lib/credential-vault.mjs';
 
@@ -639,3 +640,99 @@ if (process.platform === 'darwin') {
     }
   });
 }
+
+test('secretTargetFor and readSecret/writeSecret isolate endpoint secrets via OS vault without CLI arg leaks', () => {
+  assert.equal(secretTargetFor('translator', 'openai_1234abcd'), 'agy-powertools:secret:translator:openai_1234abcd');
+  assert.equal(
+    secretTargetFor('translator', 'gemini_abcd1234', { wslDistro: 'Ubuntu-24.04' }),
+    'agy-powertools:wsl:Ubuntu-24.04:secret:translator:gemini_abcd1234'
+  );
+  assert.throws(() => secretTargetFor('../bad', 'ok'), /凭据标识/);
+  assert.throws(() => secretTargetFor('translator', 'bad:key'), /凭据标识/);
+
+  // 1. Windows backend round-trip via base64 stdin
+  const winStore = new Map();
+  const winVault = createCredentialVault({
+    platform: 'win32',
+    runSpawn(_cmd, args, opts) {
+      assert.equal(args.join(' ').includes('sk-win-secret'), false);
+      const op = opts.env.AGY_CRED_OP;
+      const src = opts.env.AGY_CRED_SRC;
+      const dst = opts.env.AGY_CRED_DST;
+      if (op === 'write') {
+        winStore.set(dst, opts.input);
+        return { status: 0, stdout: '{"ok":true,"bytes":12,"hash":"AABB"}\n', stderr: '' };
+      }
+      if (op === 'read') {
+        const data = winStore.get(src) || '';
+        return { status: 0, stdout: JSON.stringify({ ok: true, exists: Boolean(data), data }) + '\n', stderr: '' };
+      }
+      if (op === 'remove') {
+        winStore.delete(src);
+        return { status: 0, stdout: '{"ok":true}\n', stderr: '' };
+      }
+      return { status: 0, stdout: '{"ok":true}\n', stderr: '' };
+    }
+  });
+  const winTarget = winVault.secretTargetFor('translator', 'openai_abc');
+  assert.equal(winVault.readSecret(winTarget).exists, false);
+  assert.deepEqual(winVault.writeSecret(winTarget, 'sk-win-secret-999'), { ok: true });
+  assert.deepEqual(winVault.readSecret(winTarget), { ok: true, exists: true, value: 'sk-win-secret-999' });
+  assert.deepEqual(winVault.remove(winTarget), { ok: true });
+  assert.equal(winVault.readSecret(winTarget).exists, false);
+
+  // 2. macOS backend reads via JXA/security stdin and writes without passing secrets in argv
+  let macStored = '';
+  const macVault = createCredentialVault({
+    platform: 'darwin',
+    runSpawn(cmd, args, opts) {
+      assert.equal(args.join(' ').includes('sk-mac-secret'), false);
+      if (cmd === '/usr/bin/security' && args.includes('-i')) {
+        macStored = Buffer.from(opts.input.match(/-X ([0-9a-f]+)/i)[1], 'hex').toString('utf8');
+        return { status: 0, stdout: '' };
+      }
+      if (cmd === '/usr/bin/security' && args.includes('-w')) {
+        return macStored ? { status: 0, stdout: Buffer.from(macStored + '\n') } : { status: 44, stdout: Buffer.alloc(0) };
+      }
+      if (cmd === '/usr/bin/security' && args.includes('delete-generic-password')) {
+        macStored = '';
+        return { status: 0, stdout: '' };
+      }
+      return { status: 1, stdout: '' };
+    }
+  });
+  const macTarget = macVault.secretTargetFor('translator', 'gemini_xyz');
+  assert.deepEqual(macVault.writeSecret(macTarget, 'sk-mac-secret-123'), { ok: true });
+  assert.deepEqual(macVault.readSecret(macTarget), { ok: true, exists: true, value: 'sk-mac-secret-123' });
+  assert.deepEqual(macVault.remove(macTarget), { ok: true });
+  assert.equal(macVault.readSecret(macTarget).exists, false);
+
+  // 3. Linux secret-tool backend uses stdin Buffer and rejects ENOENT cleanly
+  let linuxStored = Buffer.alloc(0);
+  const linuxVault = createCredentialVault({
+    platform: 'linux',
+    env: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/tmp/bus' },
+    runSpawn(_cmd, args, opts) {
+      assert.equal(args.join(' ').includes('sk-linux-secret'), false);
+      if (args[0] === 'store') {
+        linuxStored = Buffer.from(opts.input);
+        return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+      if (args[0] === 'lookup') {
+        return linuxStored.length
+          ? { status: 0, stdout: linuxStored, stderr: Buffer.alloc(0) }
+          : { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+      if (args[0] === 'clear') {
+        linuxStored = Buffer.alloc(0);
+        return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+      return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
+  });
+  const linuxTarget = linuxVault.secretTargetFor('translator', 'openai_lnx');
+  assert.deepEqual(linuxVault.writeSecret(linuxTarget, 'sk-linux-secret-777'), { ok: true });
+  assert.deepEqual(linuxVault.readSecret(linuxTarget), { ok: true, exists: true, value: 'sk-linux-secret-777' });
+  assert.deepEqual(linuxVault.remove(linuxTarget), { ok: true });
+  assert.equal(linuxVault.readSecret(linuxTarget).exists, false);
+});
